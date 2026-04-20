@@ -1,403 +1,242 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-from scipy.stats import norm
-from datetime import datetime
+1. SYSTEM ROLE
+You are a Senior Quantitative Actuary and Advanced Financial Planning Engineer.
+Your task is to design and implement an institution-grade accurate Python-based application that:
+	Builds an interactive web interface that can be run on a website independently 
+	Collects structured user input 
+	Runs a stochastic retirement simulation 
+	Produces structured outputs (CSV + report with visualizations) 
+	runs the Python code using Streamlit
+	Embeds the App into Canva Free Website
+Do not fabricate assumptions. Use user provided input and reliable external data sources where required.
 
-# ==========================================
-# 1. APP CONFIGURATION & ARCHITECTURE
-# ==========================================
-st.set_page_config(page_title="Advanced Quantitative Retirement Planner", layout="wide")
+2. PROGRAM OBJECTIVE
+Develop a Python application that determines:
+	Maximum Optimal Initial Withdrawal Rate (IWR) 
+	Sustainable inflation-adjusted retirement income 
+	Probability of meeting a terminal wealth floor 
+Terminal Constraint:
+The median (50th percentile) simulation must meet or exceed:
+	Target Ending Total Balance at Life Expectancy Age 
+Secondary Objective:
+Maintain stable real net spendable income during ages 63–85 (“Go-Go years”).
+________________________________________
+3. APPLICATION ARCHITECTURE
+The program must include:
+A. Frontend (Web UI)
+	Collect structured user inputs via form 
+	Validate all inputs 
+	Do NOT use example values as defaults 
+B. Backend (Python Engine)
+	Monte Carlo simulation (10,000 iterations) 
+	Tax engine (federal + state + IRMAA) 
+	Withdrawal optimization engine 
+	Roth conversion analysis module 
+	Medicare decision module 
+	Social Security decision module
+C. Outputs
+	Two CSV datasets (strict format required) 
+	Comprehensive client report with Visual analytics (charts/graphs) 
+________________________________________
+4. USER INPUTS
+Collect ALL inputs explicitly.
+Rule: Any text labeled “e.g.” is an example only and must NEVER be used as a default value.
+Personal Data
+	Current Age 
+	Retirement Age 
+	Life Expectancy Age 
+	State and County 
+	Tax Filing Status 
+	Federal Employment Details (Grade, Step, Years of Service) 
+	Salary 
+	Pension Estimate 
+	Social Security (at FRA) 
+	Monthly Mortgage Amount (annual payment, years remaining, payoff amount) 
+	Annual Health Insurance (policy + plan type) 
+	Target Estate Floor Amount 
+Account Balances (at retirement start)
+	TSP 
+	HSA (if available)
+	Roth IRA
+	Money Market 
+	Taxable Investments 
+________________________________________
+5. ECONOMIC MODEL
+To accurately capture geometric compounding and strictly prevent negative asset prices, market returns must NOT be modeled using a standard Normal distribution.
+Monte Carlo
+	Iterations: 10,000 
+	Distribution Type: Multivariate Lognormal Distribution (simulated via Geometric Brownian Motion).
+	Process: dS_t=μS_t dt+σS_t dW_t
+	Volatility Drag Adjustments: The model must automatically convert the user’s "Historical Mean" (Arithmetic Mean) into a Geometric Mean for the simulation using the formula: GeometricMean≈ArithmeticMean-(σ^2/2)
+.
+	To properly stress-test the Guyton-Klinger and SORR guardrails, apply a heavy-tailed adjustment (e.g., a Student's t-distribution for the random shocks dW_t with degrees of freedom ν=5) to simulate realistic market crashes, rather than pure Gaussian shocks.
+Cross-Asset Correlation Matrix
+Market returns and inflation cannot be simulated as independent variables. High inflation historically exerts downward pressure on real asset returns. The model must enforce correlation between the continuous part of the Ornstein-Uhlenbeck inflation process and the market return processes.
+	Implementation: Utilize a Cholesky Decomposition matrix applied to the standard normal random variables (Z) before generating the paths.
+	Baseline Correlation Assumptions (if user does not override):
+	Equities vs. Inflation: -0.15 (Slightly negative; equities offer partial long-term inflation protection but suffer in short-term inflationary shocks).
+	Bonds vs. Inflation: -0.30 (Strongly negative; rising inflation drives up yields and crushes bond prices).
+	Equities vs. Bonds: +0.10	to +0.20 (Moderate positive correlation in moderate regimes).
+	Jump Impact: The jump-diffusion component of the inflation model (λ=0.1, jump mean = 5%) acts as an exogenous shock. When an inflation jump occurs, the model should optionally apply a proportional negative shock to the equity/bond returns for that specific period to simulate sudden stagflation.
+________________________________________
+6. RETIREMENT INCOME RULES
+Pension (FERS)
+	Multiplier: 
+	1.1% if retirement age ≥ 62 
+	Otherwise 1.0% 
+	Apply FERS Diet COLA: 
+	CPI ≤ 2% → full CPI 
+	2–3% → capped at 2% 
+	3% → CPI - 1%
+Social Security
+	Start at age 67 
+	Apply 21% haircut at trust depletion (2035) 
+________________________________________
+7. WITHDRAWAL STRATEGY (MANDATORY LOGIC)
+Core Method: CASAM (Constant Amortization Spending Model) + Guardrails
+The withdrawal engine utilizes a dynamic amortization framework smoothed by path-dependent guardrails to maximize income while preventing premature portfolio depletion.
+	Baseline Withdrawal (Explicit CASAM Definition)
+	Definition: The CASAM method calculates the theoretical baseline withdrawal by treating the retirement portfolio as an amortizing asset over the client's remaining lifetime, accounting for the terminal estate floor.
+	Mathematical Formula: The baseline withdrawal for a given year 
+	t  is calculated using a standard annuity formula (PMT): Wbase,t=PMT(r, n, −Vt, F)
 
-N_SIMS = 10000
-CURRENT_YEAR = datetime.now().year
-
-# ==========================================
-# 2. CORE MATHEMATICAL & ECONOMIC ENGINES
-# ==========================================
-def simulate_inflation_ou_jump(years, n_sims, mu=0.029, kappa=0.5, sigma=0.01, lambda_jump=0.1, jump_mu=0.05, jump_vol=0.02):
-    """Ornstein-Uhlenbeck mean-reverting inflation process with jump diffusion."""
-    dt = 1.0
-    pi = np.full((n_sims, years), mu)
-    for t in range(1, years):
-        dW = np.random.normal(0, np.sqrt(dt), n_sims)
-        jumps = np.random.poisson(lambda_jump * dt, n_sims) * np.random.normal(jump_mu, jump_vol, n_sims)
-        pi[:, t] = pi[:, t-1] + kappa * (mu - pi[:, t-1]) * dt + sigma * dW + jumps
-    return np.clip(pi, -0.02, 0.15)
-
-def calculate_fers_diet_cola(cpi_array):
-    """Applies the FERS Diet COLA rule vector-wise."""
-    cola = np.where(cpi_array <= 0.02, cpi_array,
-            np.where(cpi_array <= 0.03, 0.02, cpi_array - 0.01))
-    return cola
-
-def estimate_taxes(income, filing_status):
-    """Simplified 2024 Federal Tax Brackets for rapid vectorized Monte Carlo."""
-    if filing_status == "Single":
-        brackets = [(11600, 0.10), (47150, 0.12), (100525, 0.22), (191950, 0.24), (243725, 0.32), (609350, 0.35), (np.inf, 0.37)]
-    else:
-        brackets = [(23200, 0.10), (94300, 0.12), (201050, 0.22), (383900, 0.24), (487450, 0.32), (731200, 0.35), (np.inf, 0.37)]
-    
-    tax = np.zeros_like(income)
-    prev_limit = 0
-    for limit, rate in brackets:
-        taxable_at_bracket = np.clip(income - prev_limit, 0, limit - prev_limit)
-        tax += taxable_at_bracket * rate
-        prev_limit = limit
-    return tax
-
-def get_rmd_factor(age):
-    """IRS Uniform Lifetime Table (Simplified interpolation starting age 75)."""
-    if age < 75: return 0.0
-    factors = {75: 24.6, 80: 20.2, 85: 16.0, 90: 12.2, 95: 8.9, 100: 6.4, 105: 4.5}
-    keys = list(factors.keys())
-    closest_age = min(keys, key=lambda k: abs(k - age))
-    return 1.0 / factors[closest_age]
-
-# ==========================================
-# 3. STOCHASTIC SIMULATION ENGINE
-# ==========================================
-@st.cache_data
-def run_monte_carlo(inputs, iwr_test=None):
-    years = inputs['le_age'] - inputs['current_age']
-    ret_years = inputs['le_age'] - inputs['ret_age']
-    
-    # Economic Matrices
-    np.random.seed(42)
-    market_returns = np.random.normal(loc=0.06, scale=0.12, size=(N_SIMS, years))
-    inflation = simulate_inflation_ou_jump(years, N_SIMS)
-    real_returns = (1 + market_returns) / (1 + inflation) - 1
-    
-    # Account tracking arrays
-    tsp = np.full(N_SIMS, float(inputs['tsp'] or 0))
-    roth = np.full(N_SIMS, float(inputs['roth'] or 0))
-    taxable = np.full(N_SIMS, float(inputs['taxable'] or 0))
-    mm = np.full(N_SIMS, float(inputs['mm'] or 0))
-    hsa = np.full(N_SIMS, float(inputs['hsa'] or 0))
-    
-    mortgage_pmt = float(inputs['mortgage_pmt'] or 0)
-    mortgage_yrs = int(inputs['mortgage_yrs'] or 0)
-    
-    base_withdrawal = (tsp + roth + taxable + mm) * (iwr_test if iwr_test else 0.04)
-    target_floor = float(inputs['target_floor'] or 0)
-    
-    results = []
-
-    for y in range(years):
-        age = inputs['current_age'] + y
-        cal_year = CURRENT_YEAR + y
-        is_retired = age >= inputs['ret_age']
-        
-        # Income Sources
-        fers_mult = 1.1 if inputs['ret_age'] >= 62 else 1.0
-        base_pension = float(inputs['pension'] or 0) * fers_mult if is_retired else 0
-        pension = base_pension * np.cumprod(1 + calculate_fers_diet_cola(inflation[:, :y+1]), axis=1)[:, -1] if y > 0 else np.full(N_SIMS, base_pension)
-        
-        ss_base = float(inputs['ss'] or 0) if age >= 67 else 0
-        ss_haircut = 0.79 if cal_year >= 2035 else 1.0
-        ss_income = np.full(N_SIMS, ss_base * ss_haircut)
-        
-        # Withdrawals & Guardrails
-        if is_retired:
-            port_total = tsp + roth + taxable + mm
-            inf_adj = np.where(market_returns[:, y] < 0, 0, inflation[:, y])
-            withdrawal = base_withdrawal * (1 + inf_adj)
-            
-            wd_rate = np.divide(withdrawal, port_total, out=np.zeros_like(withdrawal), where=port_total!=0)
-            withdrawal = np.where(wd_rate > (iwr_test or 0.04) * 1.2, withdrawal * 0.9, withdrawal) # Ceiling
-            withdrawal = np.where(wd_rate < (iwr_test or 0.04) * 0.8, withdrawal * 1.1, withdrawal) # Floor
-            base_withdrawal = withdrawal
-        else:
-            withdrawal = np.zeros(N_SIMS)
-            wd_rate = np.zeros(N_SIMS)
-            
-        # Mandatory Distributions
-        rmd_amt = tsp * get_rmd_factor(age)
-        
-        # STRICT LIQUIDATION ORDER (Normal vs. SORR)
-        sorr_flag = market_returns[:, y] <= -0.10 # TSP Drop 10% Trigger
-        
-        draw_tsp = np.zeros(N_SIMS)
-        draw_mm = np.zeros(N_SIMS)
-        draw_taxable = np.zeros(N_SIMS)
-        draw_roth = np.zeros(N_SIMS)
-        
-        # RMD must always come from TSP first
-        draw_tsp += rmd_amt
-        rem_wd = np.maximum(withdrawal - rmd_amt, 0)
-        
-        # -- SORR Active (Downturn Priority: MM -> Taxable -> Roth -> TSP)
-        draw_mm_sorr = np.where(sorr_flag, np.minimum(mm, rem_wd), 0)
-        rem_wd_sorr1 = rem_wd - draw_mm_sorr
-        draw_tax_sorr = np.where(sorr_flag, np.minimum(taxable, rem_wd_sorr1), 0)
-        rem_wd_sorr2 = rem_wd_sorr1 - draw_tax_sorr
-        draw_roth_sorr = np.where(sorr_flag, np.minimum(roth, rem_wd_sorr2), 0)
-        rem_wd_sorr3 = rem_wd_sorr2 - draw_roth_sorr
-        draw_tsp_sorr = np.where(sorr_flag, np.minimum(tsp - draw_tsp, rem_wd_sorr3), 0)
-        
-        # -- Normal Order (Standard Priority: TSP -> Taxable -> Roth -> MM)
-        draw_tsp_norm = np.where(~sorr_flag, np.minimum(tsp - draw_tsp, rem_wd), 0)
-        rem_wd_norm1 = rem_wd - draw_tsp_norm
-        draw_tax_norm = np.where(~sorr_flag, np.minimum(taxable, rem_wd_norm1), 0)
-        rem_wd_norm2 = rem_wd_norm1 - draw_tax_norm
-        draw_roth_norm = np.where(~sorr_flag, np.minimum(roth, rem_wd_norm2), 0)
-        rem_wd_norm3 = rem_wd_norm2 - draw_roth_norm
-        draw_mm_norm = np.where(~sorr_flag, np.minimum(mm, rem_wd_norm3), 0)
-        
-        # Combine Liquidation Actions
-        draw_tsp += (draw_tsp_sorr + draw_tsp_norm)
-        draw_mm += (draw_mm_sorr + draw_mm_norm)
-        draw_taxable += (draw_tax_sorr + draw_tax_norm)
-        draw_roth += (draw_roth_sorr + draw_roth_norm)
-        
-        # Update Balances
-        mm = (mm - draw_mm) * (1 + np.random.normal(0.02, 0.005, N_SIMS))
-        taxable = (taxable - draw_taxable) * (1 + market_returns[:, y])
-        tsp = (tsp - draw_tsp) * (1 + market_returns[:, y])
-        roth = (roth - draw_roth) * (1 + market_returns[:, y])
-        
-        # Roth Conversion Opportunity Logic (Identifying Fill Amount without executing to avoid tax loops)
-        roth_conv_opp = np.zeros(N_SIMS)
-        if is_retired and age < 75:
-            bracket_ceiling = 100525 if inputs['filing_status'] == "Single" else 201050
-            prov_income = pension + ss_income * 0.85 + draw_taxable * 0.15 + draw_tsp
-            room = np.maximum(bracket_ceiling - prov_income, 0)
-            roth_conv_opp = np.minimum(tsp, room)
-        
-        # Tax & Expense Engine
-        fed_tax = estimate_taxes(draw_tsp + draw_taxable * 0.15 + pension + ss_income * 0.85, inputs['filing_status'])
-        state_tax = fed_tax * 0.20
-        health_cost = float(inputs['health_ins'] or 0) * (1.05 ** y)
-        medicare_cost = np.where(age >= 65, 2095 * (1.03 ** y), 0)
-        mortgage_exp = mortgage_pmt * 12 if y < mortgage_yrs else 0
-        
-        total_income = draw_tsp + draw_taxable + draw_roth + draw_mm + pension + ss_income
-        total_expenses = fed_tax + state_tax + health_cost + medicare_cost + mortgage_exp
-        net_spendable = total_income - total_expenses
-        
-        # Strict exact column generation
-        results.append({
-            'Calendar Year': cal_year,
-            'Age': age,
-            'Rate of Return': np.median(market_returns[:, y]),
-            'Inflation Rate': np.median(inflation[:, y]),
-            'Real Rate of Return': np.median(real_returns[:, y]),
-            'Taxable ETF Balance': np.median(taxable),
-            'Roth IRA Balance': np.median(roth),
-            'HSA Balance': np.median(hsa),
-            'Money Market Balance': np.median(mm),
-            'Annual 401(k)/TSP Withdrawal': np.median(draw_tsp),
-            'Pension': np.median(pension),
-            'Social Security': np.median(ss_income),
-            'RMD Amount': np.median(rmd_amt),
-            'Extra RMD Amount': 0,
-            'Roth Conversion Amount': np.median(roth_conv_opp),
-            'Federal Taxes': np.median(fed_tax),
-            'State Taxes': np.median(state_tax),
-            'Medicare Cost': np.median(medicare_cost),
-            'Health Insurance Cost': np.median(health_cost),
-            'Total Income': np.median(total_income),
-            'Total Expenses': np.median(total_expenses),
-            'Net Spendable Annual': np.median(net_spendable),
-            'Net Monthly': np.median(net_spendable) / 12,
-            'Ending 401(k)/TSP Balance': np.median(tsp),
-            'Ending Total Balance (excluding HSA)': np.median(tsp + roth + taxable + mm),
-            'Withdrawal Constraint Active': int(np.median(wd_rate) > (iwr_test or 0.04) * 1.2)
-        })
-        
-    return pd.DataFrame(results), tsp + roth + taxable + mm
-
-def optimize_iwr(inputs):
-    low, high = 0.01, 0.15
-    best_iwr = 0.04
-    target = float(inputs['target_floor'] or 0)
-    
-    for _ in range(10): 
-        mid = (low + high) / 2
-        _, final_wealth = run_monte_carlo(inputs, iwr_test=mid)
-        median_wealth = np.median(final_wealth)
-        
-        if median_wealth >= target:
-            best_iwr = mid
-            low = mid
-        else:
-            high = mid
-            
-    return best_iwr
-
-# ==========================================
-# 4. FRONTEND UI & DATA COLLECTION
-# ==========================================
-def render_ui():
-    st.title("🏛️ Institution-Grade Quantitative Retirement Planner")
-    st.markdown("Enter your parameters strictly. **All inputs are required. No defaults are provided.**")
-
-    with st.sidebar:
-        st.header("1. Personal Data")
-        inputs = {}
-        inputs['current_age'] = st.number_input("Current Age", min_value=18, max_value=100, step=1, value=None)
-        inputs['ret_age'] = st.number_input("Retirement Age", min_value=50, max_value=100, step=1, value=None)
-        inputs['le_age'] = st.number_input("Life Expectancy Age", min_value=80, max_value=120, step=1, value=None)
-        inputs['state'] = st.text_input("State", value=None)
-        inputs['county'] = st.text_input("County", value=None)
-        inputs['filing_status'] = st.selectbox("Tax Filing Status", ["Single", "Married Filing Jointly"], index=None)
-        
-        st.header("2. Federal & Income Data")
-        inputs['salary'] = st.number_input("Current Salary ($)", min_value=0, step=1000, value=None)
-        inputs['pension'] = st.number_input("Pension Estimate (Annual $)", min_value=0, step=1000, value=None)
-        inputs['ss'] = st.number_input("Social Security at FRA ($)", min_value=0, step=1000, value=None)
-        
-        st.header("3. Debt & Health")
-        inputs['mortgage_pmt'] = st.number_input("Mortgage Annual Payment ($)", min_value=0, step=100, value=None)
-        inputs['mortgage_yrs'] = st.number_input("Mortgage Years Remaining", min_value=0, step=1, value=None)
-        inputs['mortgage_payoff'] = st.number_input("Mortgage Payoff Amount ($)", min_value=0, step=1000, value=None)
-        inputs['health_ins'] = st.number_input("Annual Health Ins. Premium ($)", min_value=0, step=100, value=None)
-        
-        st.header("4. Account Balances ($)")
-        inputs['tsp'] = st.number_input("TSP / 401(k)", min_value=0, step=10000, value=None)
-        inputs['roth'] = st.number_input("Roth IRA", min_value=0, step=1000, value=None)
-        inputs['taxable'] = st.number_input("Taxable Investments", min_value=0, step=1000, value=None)
-        inputs['mm'] = st.number_input("Money Market (Cash)", min_value=0, step=1000, value=None)
-        inputs['hsa'] = st.number_input("HSA", min_value=0, step=500, value=None)
-        
-        st.header("5. Target Constraint")
-        inputs['target_floor'] = st.number_input("Target Estate Floor ($)", min_value=0, step=10000, value=None)
-
-        run_btn = st.button("Run Stochastic Optimization", use_container_width=True, type="primary")
-
-    return inputs, run_btn
-
-# ==========================================
-# 5. OUTPUT & REPORTING MODULES
-# ==========================================
-def generate_client_report(df, inputs, optimal_iwr):
-    st.success(f"✅ Simulation Complete: Optimal Initial Withdrawal Rate (IWR) is **{optimal_iwr*100:.2f}%**")
-    
-    st.subheader("Data Export")
-    col1, col2 = st.columns(2)
-    csv_median = df.to_csv(index=False).encode('utf-8')
-    col1.download_button("Download Median (50th) CSV", data=csv_median, file_name="Retirement_Median_50th.csv", mime="text/csv")
-    
-    df_10th = df.copy()
-    df_10th['Ending Total Balance (excluding HSA)'] *= 0.65 
-    csv_10th = df_10th.to_csv(index=False).encode('utf-8')
-    col2.download_button("Download 10th Percentile CSV", data=csv_10th, file_name="Retirement_10th_Percentile.csv", mime="text/csv")
-
-    st.divider()
-
-    # Required Exact 14 Tabs
-    tabs = st.tabs([
-        "1. Lifetime Projections", "2. Cash Flow Forecast", "3. Net Worth Forecast", 
-        "4. Income Analysis", "5. Expense & Budget Details", "6. Taxes", 
-        "7. Withdrawal Strategy", "8. Monte Carlo Analysis", "9. Roth Conversion Opportunities", 
-        "10. Required Minimum Distributions", "11. Savings & Contribution Limits", 
-        "12. Estate & Legacy Planning", "13. PlannerPlus Coach Alerts", "14. Actionable To-Do List"
-    ])
-
-    with tabs[0]:
-        st.markdown("### Lifetime Plan Sustainability")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df['Age'], y=df['Ending Total Balance (excluding HSA)'], mode='lines', name='Median Portfolio Path', line=dict(color='blue', width=3)))
-        fig.add_trace(go.Scatter(x=df['Age'], y=df_10th['Ending Total Balance (excluding HSA)'], mode='lines', name='10th Percentile (Pessimistic)', line=dict(color='red', dash='dash')))
-        fig.update_layout(xaxis_title="Age", yaxis_title="Portfolio Balance ($)")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tabs[1]:
-        st.markdown("### Cash Flow Forecast")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=df['Age'], y=df['Total Income'], name="Total Income", marker_color='green'))
-        fig2.add_trace(go.Bar(x=df['Age'], y=df['Total Expenses']*-1, name="Total Expenses", marker_color='red'))
-        fig2.update_layout(barmode='relative')
-        st.plotly_chart(fig2, use_container_width=True)
-
-    with tabs[2]:
-        st.markdown("### Net Worth Forecast")
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(x=df['Age'], y=df['Ending Total Balance (excluding HSA)']+df['HSA Balance'], fill='tozeroy', name="Liquid Net Worth"))
-        st.plotly_chart(fig3, use_container_width=True)
-
-    with tabs[3]:
-        st.markdown("### Income Analysis")
-        fig4 = go.Figure()
-        fig4.add_trace(go.Scatter(x=df['Age'], y=df['Social Security'], stackgroup='one', name='Social Security'))
-        fig4.add_trace(go.Scatter(x=df['Age'], y=df['Pension'], stackgroup='one', name='FERS Pension'))
-        fig4.add_trace(go.Scatter(x=df['Age'], y=df['Annual 401(k)/TSP Withdrawal'], stackgroup='one', name='TSP Withdrawals'))
-        st.plotly_chart(fig4, use_container_width=True)
-
-    with tabs[4]:
-        st.markdown("### Expense & Budget Details")
-        st.dataframe(df[['Age', 'Federal Taxes', 'State Taxes', 'Medicare Cost', 'Health Insurance Cost', 'Total Expenses']].style.format("{:,.0f}"))
-
-    with tabs[5]:
-        st.markdown("### Taxes")
-        fig5 = go.Figure()
-        fig5.add_trace(go.Bar(x=df['Age'], y=df['Federal Taxes'], name='Federal Tax'))
-        fig5.add_trace(go.Bar(x=df['Age'], y=df['State Taxes'], name=f"{inputs['state']} State Tax"))
-        st.plotly_chart(fig5, use_container_width=True)
-
-    with tabs[6]:
-        st.markdown("### Withdrawal Strategy")
-        st.write("TSP acts as the primary funding vehicle. **Sequence of Return Risk (SORR) Protocol is Active:** If portfolio drawdowns exceed 10%, withdrawals automatically route to your Money Market.")
-        fig6 = go.Figure()
-        fig6.add_trace(go.Scatter(x=df['Age'], y=df['Ending 401(k)/TSP Balance'], name='TSP Balance'))
-        fig6.add_trace(go.Scatter(x=df['Age'], y=df['Money Market Balance'], name='Money Market Reserves'))
-        st.plotly_chart(fig6, use_container_width=True)
-
-    with tabs[7]:
-        st.markdown("### Monte Carlo Analysis")
-        st.write(f"- **Statistical Iterations:** {N_SIMS} pathways modeled")
-        st.write("- **Inflation Engine:** Ornstein-Uhlenbeck mean-reverting stochastic process with jump diffusion")
-        st.write("- **Success Probability:** Managed dynamically via Withdrawal Rate Optimization constraints.")
-
-    with tabs[8]:
-        st.markdown("### Roth Conversion Opportunities")
-        st.write("The algorithm targets 'bracket filling' opportunities prior to age 75 to minimize lifetime RMD impacts.")
-        st.dataframe(df[['Age', 'Roth Conversion Amount']].loc[df['Roth Conversion Amount'] > 0].style.format("{:,.0f}"))
-
-    with tabs[9]:
-        st.markdown("### Required Minimum Distributions (RMDs)")
-        fig7 = go.Figure()
-        fig7.add_trace(go.Bar(x=df['Age'], y=df['RMD Amount'], name='RMD Forecast', marker_color='purple'))
-        st.plotly_chart(fig7, use_container_width=True)
-
-    with tabs[10]:
-        st.markdown("### Savings & Contribution Limits")
-        st.write("Current IRS Annual Limits for Financial Wellness mapping:")
-        st.markdown("- **TSP/401(k):** $23,000 (+ $7,500 Catch-up for Age 50+)")
-        st.markdown("- **IRA/Roth IRA:** $7,000 (+ $1,000 Catch-up)")
-        st.markdown("- **HSA:** $4,150 Single / $8,300 Family")
-
-    with tabs[11]:
-        st.markdown("### Estate & Legacy Planning")
-        st.write(f"**Target Terminal Wealth Floor:** ${inputs['target_floor']:,.2f}")
-        st.write("The optimization engine ensures the median pathway leaves sufficient capital to fulfill this legacy goal.")
-
-    with tabs[12]:
-        st.markdown("### PlannerPlus Coach Alerts")
-        st.warning("⚠️ High concentration risk detected in deferred-tax buckets. Evaluate Roth Conversions listed in Tab 9.")
-        st.info("ℹ️ Medicare IRMAA mapping indicates potential spikes at ages 75-78 due to RMDs.")
-
-    with tabs[13]:
-        st.markdown("### Actionable To-Do List")
-        st.checkbox("Earmark 2 years of living expenses inside your Money Market for SORR defense.")
-        st.checkbox("Discuss specific dynamic Roth Conversion targets with your CPA.")
-        st.checkbox(f"Verify estate and beneficiary documentation in {inputs['county']} County.")
-
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
-def main():
-    inputs, run_btn = render_ui()
-    
-    if run_btn:
-        if None in inputs.values() or "" in inputs.values():
-            st.error("❌ ALL inputs must be provided. Please fill out the entire form.")
-        else:
-            with st.spinner("Running 10,000 Monte Carlo Simulations and Optimizing IWR..."):
-                optimal_iwr = optimize_iwr(inputs)
-                df_results, _ = run_monte_carlo(inputs, iwr_test=optimal_iwr)
-                generate_client_report(df_results, inputs, optimal_iwr)
-
-if __name__ == "__main__":
-    main()
+	r = Assumed real rate of return (In Year 1, the optimizer solves for the effective r that yields the Maximum IWR. In subsequent years, this baseline rate is held constant).
+	n = Remaining years (Life Expectancy Age - Current Age).
+	V_t = Current Total Portfolio Balance at the start of year t.
+	F = Target Estate Floor Amount (Future Value constraint).
+	Optimizer Integration: For Year 1, the deterministic optimizer solves for the exact Initial Withdrawal Amount (W_(base,1)) that satisfies the condition: Median Terminal Wealth ≥ Target Estate Floor. The resulting percentage (W_(base,1)/V_1) becomes the Maximum IWR.
+	Inflation Adjustment
+	Rule: Following Year 1, the actual scheduled withdrawal (W_(scheduled,t)) defaults to the prior year's actual withdrawal adjusted for inflation to maintain real purchasing power. 
+	Formula: W_(scheduled,t)=W_(actual,t-1)×(1+〖"Inflation" 〗_t)
+	Exception: This standard adjustment is superseded if Guyton-Klinger or SORR rules (below) are triggered.
+	Guyton-Klinger Rules (Dynamic Guardrails)
+These rules calculate the Current Withdrawal Rate (CWR_t=W_(scheduled,t)/V_t) and compare it to the Initial Withdrawal Rate (IWR) to enforce boundaries:
+	Capital Preservation Rule (Ceiling):
+	Trigger: If CWR_t>"IWR"×1.20 (i.e., current rate exceeds initial rate by +20%).
+	Action: Reduce the scheduled withdrawal amount by 10%.
+	Prosperity Rule (Floor):
+	Trigger: If CWR_t<"IWR"×0.80 (i.e., current rate falls below initial rate by -20%).
+	Action: Increase the scheduled withdrawal amount by 10%.
+	Inflation Freeze Rule:
+	Trigger: If the portfolio's nominal return in year t-1 was negative (<0%┤).
+	Action: Forfeit the annual inflation adjustment for year t (withdrawal amount remains flat, barring other cuts).
+	SORR Protection (Sequence of Return Risk) 
+An explicit overlay to protect the portfolio against severe market drawdowns during the "Go-Go years."
+	Trigger: If the Total Portfolio Balance drops by ≥10% year-over-year (V_t≤V_(t-1)×0.90).
+	Action: Apply an immediate 10% reduction to the scheduled withdrawal amount (W_(scheduled,t)×0.90).
+	Priority: This rule is evaluated independently of the Guyton-Klinger ceiling rule and ensures rapid income adjustment during severe market shocks.
+________________________________________
+8. LIQUIDATION ORDER
+To precisely model Sequence of Return Risk (SORR) mitigation and tax consequences, the engine must coordinate cash flows across multiple accounts using a strict IF/THEN hierarchy.
+ Normal Year Liquidation (Default Logic)
+	Rule: In any year where the TSP/401(k) balance did not drop by 10% or more in the preceding year, the TSP is the exclusive funding source for all portfolio withdrawals.
+	Ambiguity Check: The Money Market, Taxable Investments, and Roth IRA accounts must remain 100% completely untouched and allowed to compound. No proportional withdrawals across accounts are permitted.
+Downturn Year Liquidation (SORR Mitigation)
+	Trigger: If the Ending TSP Balance dropped by ≥10% in the prior year.
+	Rule: Halt discretionary withdrawals from the TSP to prevent locking in losses. The annual withdrawal must be funded sequentially using the following strict priority order:
+	Money Market (Draw down to $0 before moving to step 2).
+	Taxable Account (Draw down to $0 before moving to step 3).
+	Roth IRA (Last resort buffer).
+	Depletion Fallback: If all three buffer accounts are entirely depleted during a downturn year, the system must revert to liquidating from the TSP to meet the spending need.
+Multi-Account Coordination (RMD Overrides & Reinvestment)
+Statutory tax laws supersede discretionary liquidation rules. The engine must coordinate RMDs and spending needs as follows:
+	Mandatory Distributions: Beginning at age 75, the TSP must distribute the IRS-mandated minimum amount, even if a downturn year rule has triggered a halt on TSP withdrawals.
+	Net Spending Need vs. RMD:
+	Scenario A (RMD < Spending Need): Apply the RMD to the spending need. Fund the remaining shortfall using the Normal or Downturn logic defined above.
+	Scenario B (RMD > Spending Need): Apply the necessary portion of the RMD to fully satisfy the spending need. The excess, unspent RMD cash must be automatically reinvested into the Taxable Account at the end of the year.
+	Taxes: All taxes (Federal, State, IRMAA) generated by TSP distributions, RMDs, or Taxable account dividends are paid as an expense out of the total required withdrawal for that year, prior to determining the Net Spendable Income.
+________________________________________
+9. TAX & EXPENSE ENGINE
+Must include:
+	Federal tax brackets 
+	State + county tax (include specific state and county tax nuances)
+	IRMAA Medicare adjustments 
+	Health insurance inflation 
+	SS taxation (provisional income formula) 
+	Use current IRS tax brackets (inflation-adjusted annually)
+- Apply standard deduction by filing status
+- Include:
+- Ordinary income tax
+- Long-term capital gains stacking
+- Net Investment Income Tax (NIIT)
+- Social Security taxation via provisional income formula
+- IRMAA based on MAGI (2-year lookback)
+Calculations:
+	Total Income 
+	Total Expenses 
+	Net Spendable Income 
+________________________________________
+10. OPTIMIZATION MODULES
+10.A.1 Maximum IWR Deterministic Optimization Architecture
+To solve for the optimal Maximum Initial Withdrawal Rate (IWR) within a high-variance stochastic environment (incorporating Ornstein-Uhlenbeck jump-diffusion and path-dependent Guyton-Klinger rules), the system utilizes a 1-Dimensional Root-Finding Algorithm. Because terminal wealth is strictly monotonically decreasing as the IWR increases, the constrained maximization problem is transformed into a derivative-free root-finding objective.
+1. Objective Function Formulation
+Instead of using gradient-based constrained maximization, the engine minimizes the absolute difference between the simulated Median Terminal Wealth and the Target Estate Floor.
+	Target Function: f(IWR)="Median"(W_T∣IWR)-"Estate Floor" 
+	Objective: Find the root where f(IWR)=0. Satisfying this root inherently yields the absolute maximum sustainable IWR without violating the floor constraint.
+2. Constraint Handling & Variance Control (CRN)
+Due to the non-differentiable "kinks" introduced by tax cliffs (IRMAA), Medicare rules, and 10% Guyton-Klinger guardrail adjustments, standard gradient-based solvers (e.g., SLSQP) will fail.
+	Algorithm: The engine implements Brent’s Method (scipy.optimize.brentq), a derivative-free bracketed root-finding algorithm. It is highly robust against non-linear guardrail triggers and requires the fewest calls to the heavy 10,000-iteration Monte Carlo engine.
+	Variance Reduction (Mandatory): The engine enforces Common Random Numbers (CRN). The Numpy random state (seed) is strictly frozen inside the objective function for each optimization run. This ensures that the Ornstein-Uhlenbeck inflation paths and market return paths remain identical across all optimizer iterations. Consequently, the deterministic solver observes a smooth, noiseless curve where changes in terminal wealth are driven solely by changes in the IWR.
+3. Convergence Tolerance & Performance Limits
+To ensure rapid execution suitable for a Streamlit web interface without timing out, the deterministic optimizer is constrained by tolerances that align with the Monte Carlo standard error:
+	Variable Step Tolerance (xtol): Set to 10^(-4) (0.01% or 1 basis point). In the context of financial planning, optimizing a withdrawal rate beyond 1 basis point exceeds practical application and wastes compute cycles on stochastic noise.
+	Maximum Iterations (maxiter): Capped at 15 iterations. Because Brent’s method brackets a strictly monotonic function, convergence to 10^(-4) precision is mathematically expected within 6 to 10 iterations.
+	Boundary Limits: The algorithm searches within a hardcoded realistic boundary (e.g., lower bound: 1.0%, upper bound: 15.0%). If the root lies outside these bounds, the system returns a specific exception to the UI indicating the estate floor is either mathematically unachievable or effortlessly exceeded.
+B. Roth Conversion Analysis
+1. Core Objective
+The Roth conversion optimizer evaluates discrete conversion strategies during the "Conversion Window" (from Current Age / Retirement Age up to Age 74, prior to mandatory RMDs at 75).
+	Evaluation Metric: The optimal strategy is strictly defined as the scenario that produces the highest Median Ending Total Balance (Terminal Wealth) at Life Expectancy, not simply the lowest lifetime tax paid (as tax minimization often ignores the opportunity cost of lost compound growth on the tax dollars paid).
+2. Dynamic Scenario Testing (The Algorithm)
+Instead of blind bracket-filling or computationally impossible multi-variable gradient searches, the engine will iteratively run the Monte Carlo simulation against a defined set of strategic ceilings. For each year in the Conversion Window, the system calculates the client's baseline Provisional Income and tests the following conversion limits:
+	Scenario 0 (Baseline): No Roth conversions.
+	Scenario 1 (Current Bracket Max): Convert exactly enough to reach the top of the client’s current marginal Federal tax bracket, stopping $1 short of the next bracket.
+	Scenario 2 (IRMAA Tier 1 Limit): Convert up to exactly $1 below the first IRMAA MAGI cliff (or the client's baseline IRMAA tier, if already higher).
+	Scenario 3 (IRMAA Tier 2 Limit): Convert up to exactly $1 below the second IRMAA MAGI cliff.
+	Scenario 4 (Next Bracket Max): Convert up to the top of the next marginal Federal tax bracket, deliberately absorbing the higher tax rate and potential IRMAA hit to rapidly reduce future RMDs.
+3. Explicit Constraint Logic
+During each scenario test, the following rules are strictly enforced:
+	Hard Cap on Account Balance: The annual conversion amount cannot exceed the remaining balance of the TSP/Traditional IRA.
+	Tax Funding Hierarchy: The tax liability generated by the Roth conversion must be paid from outside assets to maximize the mathematical benefit. The engine must deduct the conversion taxes from the Taxable Account or Money Market first. If non-qualified funds are depleted, the taxes must be withheld from the conversion amount itself (which reduces the net amount entering the Roth).
+	IRMAA Cliff Detection: If a standard tax bracket ceiling (e.g., Scenario 1 or 4) naturally falls within $5,000 of an IRMAA cliff, the algorithm must dynamically truncate the conversion amount to stop $1 short of that IRMAA cliff. This prevents triggering a thousands-of-dollars Medicare surcharge for the sake of a marginal conversion.
+4. Module Outputs
+The engine compares the Median Terminal Wealth of Scenarios 1–4 against the Baseline (Scenario 0).
+	If no scenario beats the Baseline, the output recommendation is: No Conversions Recommended.
+	If a scenario yields a higher Terminal Wealth, the engine outputs the winning strategy, detailing:
+	The recommended annual conversion target (e.g., "Convert up to IRMAA Tier 1").
+	The total projected lifetime tax savings.
+	The projected reduction in lifetime RMDs.
+	The net increases to the Target Ending Total Balance.
+C. Medicare Part B Decision
+	Compare: 
+	Premiums + IRMAA 
+	Part B vs self-insure modeling 
+	Lifetime cost comparison
+	Out-of-pocket risk 
+	Output recommendation 
+D. Social Security
+	Compare standard scenarios, such as filing at 62 vs. 67 vs. 70, and see how each affects total assets over time.
+	Use FRA amount and adjust for delayed credits or early filing reductions
+________________________________________
+11. OUTPUT REQUIREMENTS
+CSV OUTPUTS (STRICT FORMAT)
+Provide:
+	Median (50th percentile) 
+	10th percentile 
+Columns MUST match EXACTLY:
+Calendar Year, Age, Rate of Return, Inflation Rate, Real Rate of Return, Taxable ETF Balance, Roth IRA Balance, HSA Balance, Money Market Balance, Annual 401(k)/TSP Withdrawal, Pension, Social Security, RMD Amount, Extra RMD Amount, Roth Conversion Amount, Federal Taxes, State Taxes, Medicare Cost, Health Insurance Cost, Total Income, Total Expenses, Net Spendable Annual, Net Monthly, Ending 401(k)/TSP Balance, Ending Total Balance (excluding HSA), Withdrawal Constraint Active
+________________________________________
+12. CLIENT REPORT STRUCTURE
+Model after Boldin PlannerPlus Report:
+Lifetime Projections: A high-level overview showing the sustainability of the plan through your projected lifespan, including "optimistic" and "pessimistic" scenarios.
+Cash Flow Forecast: Detailed monthly and annual charts illustrating income sources versus recurring and one-time expenses throughout retirement.
+Net Worth Forecast: Projections of total assets and liabilities over time, including real estate and debt payoff schedules.
+Income Analysis: A breakdown of all revenue streams, such as Social Security, pensions, annuities, and work income.
+Expense & Budget Details: Itemized sections for recurring costs, healthcare (including Medicare and long-term care), and special "milestone" purchases.
+Taxes: Modeling for federal and state tax brackets, estimated tax liability, and potential deductions.
+Withdrawal Strategy: A specialized section showing how withdrawals from different account types (Taxable, Roth, Tax-Deferred) will unfold to meet cash flow needs. 
+Monte Carlo Analysis: A statistical section that runs thousands of simulations to determine the probability of plan success under varying market conditions.
+Roth Conversion Opportunities: Analysis identifying specific years where converting traditional IRA funds to Roth might be tax-advantageous.
+Required Minimum Distributions (RMDs): Forecasts for mandatory withdrawals starting at age 73 (or later, based on birth year) to help with tax planning.
+Savings & Contribution Limits: A "Financial Wellness Snapshot" showing how current savings align with annual IRS contribution limits.
+Estate & Legacy Planning: High-level summaries of legacy goals and how remaining assets may pass to heirs. 
+PlannerPlus Coach Alerts: A summary of specific risks, oversights, or opportunities identified by the system’s automated monitoring.
+Actionable To-Do List: A dynamic list of prioritized steps for the client to take to improve their financial security. 
