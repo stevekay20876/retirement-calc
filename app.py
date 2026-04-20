@@ -11,16 +11,14 @@ from datetime import datetime
 # ==========================================
 st.set_page_config(page_title="Advanced Quantitative Retirement Engine", layout="wide")
 
-# Tax Brackets (2024/2025 simplified for Ordinary Income)
 FED_BRACKETS = [
     (0.10, 0, 23200), (0.12, 23200, 94300), (0.22, 94300, 201050),
     (0.24, 201050, 383900), (0.32, 383900, 487450), (0.35, 487450, 731200), (0.37, 731200, float('inf'))
 ]
 STD_DED = {"Single": 14600, "Married": 29200}
-IRMAA_CLIFFS = [206000, 258000, 322000, 386000, 750000] # Married Example
+IRMAA_CLIFFS = [206000, 258000, 322000, 386000, 750000]
 IRMAA_PREMIUMS = [174.70, 244.60, 349.40, 454.20, 559.00, 593.90]
 
-# RMD Divisor Approximation (Uniform Lifetime Table)
 def get_rmd_divisor(age):
     if age < 75: return float('inf')
     ult = {75: 24.6, 80: 20.2, 85: 16.0, 90: 12.2, 95: 8.9, 100: 6.4, 105: 4.6}
@@ -29,8 +27,7 @@ def get_rmd_divisor(age):
 # ==========================================
 # UI: STRUCTURED DATA COLLECTION
 # ==========================================
-st.title("Institution-Grade Stochastic Retirement Optimization Engine")
-st.markdown("Enter client inputs. Default placeholders are strictly prohibited to ensure custom accuracy.")
+st.title("Institution-Grade Stochastic Retirement Optimization")
 
 with st.sidebar:
     st.header("1. Personal Data")
@@ -68,14 +65,11 @@ if any(x is None for x in required):
     st.warning("⚠️ Please fill in all required explicit inputs in the sidebar to run the simulation.")
     st.stop()
 
-if le_age <= curr_age:
+if int(le_age) <= int(curr_age):
     st.error("⚠️ Life Expectancy Age must be greater than Current Age.")
     st.stop()
 
-# Ensure inputs are ints for loops
-curr_age = int(curr_age)
-ret_age = int(ret_age)
-le_age = int(le_age)
+curr_age, ret_age, le_age = int(curr_age), int(ret_age), int(le_age)
 
 # ==========================================
 # STOCHASTIC ECONOMIC GENERATOR
@@ -84,110 +78,82 @@ def generate_economic_paths(n_paths=10000, n_years=50, seed=42):
     np.random.seed(seed)
     corr_matrix = np.array([[1.0, -0.15], [-0.15, 1.0]])
     L = np.linalg.cholesky(corr_matrix)
-    
     df = 5
-    shocks = stats.t.rvs(df, size=(2, n_years, n_paths))
-    shocks = shocks / np.sqrt(df / (df - 2)) 
+    shocks = stats.t.rvs(df, size=(2, n_years, n_paths)) / np.sqrt(df / (df - 2)) 
     corr_shocks = np.einsum('ij,jkl->ikl', L, shocks)
     Z_market, Z_infl = corr_shocks[0], corr_shocks[1]
     
     geom_mean = arith_mean - (volatility**2)/2.0
-    dt = 1.0
-    market_returns = np.exp(geom_mean*dt + volatility*np.sqrt(dt)*Z_market) - 1.0
+    market_returns = np.exp(geom_mean*1.0 + volatility*1.0*Z_market) - 1.0
     
     inf_mu, inf_theta, inf_sigma, jump_prob = 0.025, 0.3, 0.015, 0.10
     inflation_paths = np.zeros((n_years, n_paths))
     inf_current = np.full(n_paths, inf_mu)
     
     for t in range(n_years):
-        dW = Z_infl[t]
         jumps = np.where(np.random.rand(n_paths) < jump_prob, np.random.normal(0.04, 0.01, n_paths), 0)
         market_returns[t] = np.where(jumps > 0, market_returns[t] - (jumps * 0.5), market_returns[t])
-        
-        dI = inf_theta * (inf_mu - inf_current) + inf_sigma * dW + jumps
+        dI = inf_theta * (inf_mu - inf_current) + inf_sigma * Z_infl[t] + jumps
         inf_current = np.clip(inf_current + dI, -0.02, 0.15)
         inflation_paths[t] = inf_current
         
     return market_returns, inflation_paths
 
-# ==========================================
-# CORE MONTE CARLO & WITHDRAWAL ENGINE
-# ==========================================
 def calculate_taxes(income_arr, filing_status):
     deduction = STD_DED.get(filing_status, 14600)
     taxable = np.maximum(income_arr - deduction, 0)
     tax = np.zeros_like(taxable)
     for rate, lower, upper in FED_BRACKETS:
-        tax_in_bracket = np.maximum(np.minimum(taxable, upper) - lower, 0)
-        tax += tax_in_bracket * rate
+        tax += np.maximum(np.minimum(taxable, upper) - lower, 0) * rate
     return tax
 
+# ==========================================
+# CORE MONTE CARLO & WITHDRAWAL ENGINE
+# ==========================================
 def run_simulation(IWR, market_paths, inflation_paths):
-    n_years = le_age - curr_age
-    n_paths = market_paths.shape[1]
+    n_years, n_paths = market_paths.shape
+    v_tsp, v_roth, v_tax, v_mm, v_hsa = (np.full(n_paths, float(bal)) for bal in (tsp_bal, roth_bal, tax_bal, mm_bal, hsa_bal))
+    w_scheduled = np.full(n_paths, IWR * (tsp_bal + roth_bal + tax_bal + mm_bal))
     
-    v_tsp, v_roth, v_tax = np.full(n_paths, float(tsp_bal)), np.full(n_paths, float(roth_bal)), np.full(n_paths, float(tax_bal))
-    v_mm, v_hsa = np.full(n_paths, float(mm_bal)), np.full(n_paths, float(hsa_bal))
-    
-    w_base1 = IWR * (tsp_bal + roth_bal + tax_bal + mm_bal)
-    w_scheduled = np.full(n_paths, w_base1)
-    
-    # Cumulative trajectory arrays
     current_health = np.full(n_paths, float(health_ins))
-    current_pension = np.zeros(n_paths)
-    current_ss = np.zeros(n_paths)
+    current_pension, current_ss = np.zeros(n_paths), np.zeros(n_paths)
     
     results = []
-    
+    prev_v_tsp = v_tsp.copy()
+    prev_total_port = v_tsp + v_roth + v_tax + v_mm
+
     for t in range(n_years):
-        age = curr_age + t
-        year = datetime.now().year + t
+        age, year = curr_age + t, datetime.now().year + t
         ret_t, inf_t = market_paths[t], inflation_paths[t]
         
         # Grow Balances
-        v_tsp *= (1 + ret_t)
-        v_roth *= (1 + ret_t)
-        v_tax *= (1 + ret_t)
+        v_tsp *= (1 + ret_t); v_roth *= (1 + ret_t); v_tax *= (1 + ret_t); v_hsa *= (1 + ret_t)
         v_mm *= (1 + ret_t * 0.02)
-        v_hsa *= (1 + ret_t)
         total_port = v_tsp + v_roth + v_tax + v_mm
         
-        # Income Trajectories
+        # Inflows & Outflows
         cola = np.where(inf_t <= 0.02, inf_t, np.where(inf_t <= 0.03, 0.02, inf_t - 0.01))
-        
-        if age == ret_age:
-            pension_mult = 1.1 if ret_age >= 62 else 1.0
-            current_pension = np.full(n_paths, float(salary * yos * pension_mult / 100))
-        elif age > ret_age:
-            current_pension *= (1 + cola)
+        if age == ret_age: current_pension = np.full(n_paths, float(salary * yos * (1.1 if ret_age >= 62 else 1.0) / 100))
+        elif age > ret_age: current_pension *= (1 + cola)
             
-        if age == 67:
-            current_ss = np.full(n_paths, float(ss_fra * 12))
-        elif age > 67:
-            current_ss *= (1 + inf_t)
+        if age == 67: current_ss = np.full(n_paths, float(ss_fra * 12))
+        elif age > 67: current_ss *= (1 + inf_t)
             
-        if t > 0:
-            current_health *= (1 + inf_t + 0.02)
+        if t > 0: current_health *= (1 + inf_t + 0.02)
 
-        ss_arr = current_ss.copy()
-        if year >= 2035:
-            ss_arr *= 0.79 # 21% Haircut
-            
+        ss_arr = current_ss * (0.79 if year >= 2035 else 1.0)
         mort = float(mort_pmt) if t < mort_yrs else 0.0
         
         # CASAM Guardrails
         if t > 0:
-            freeze_mask = market_paths[t-1] < 0
-            w_scheduled *= (1 + np.where(freeze_mask, 0, inf_t))
+            w_scheduled *= (1 + np.where(market_paths[t-1] < 0, 0, inf_t))
             cwr = w_scheduled / np.maximum(total_port, 1)
             w_scheduled = np.where(cwr > (IWR * 1.20), w_scheduled * 0.90, w_scheduled)
             w_scheduled = np.where(cwr < (IWR * 0.80), w_scheduled * 1.10, w_scheduled)
-            if t > 0:
-                w_scheduled = np.where(total_port <= (prev_total_port * 0.90), w_scheduled * 0.90, w_scheduled)
+            w_scheduled = np.where(total_port <= (prev_total_port * 0.90), w_scheduled * 0.90, w_scheduled)
         
         prev_total_port = total_port.copy()
         
-        # Spending Need
         fixed_inflows = current_pension + ss_arr
         fixed_expenses = mort + current_health
         spending_need = np.maximum(w_scheduled + fixed_expenses - fixed_inflows, 0)
@@ -200,36 +166,33 @@ def run_simulation(IWR, market_paths, inflation_paths):
             
         rmd_applied = np.minimum(rmd_req, spending_need)
         v_tsp -= rmd_req
-        v_tax += np.maximum(rmd_req - spending_need, 0) # Reinvest excess RMD
+        v_tax += np.maximum(rmd_req - spending_need, 0) 
         rem_need = spending_need - rmd_applied
         
-        # Normal Mode
+        # Withdrawals
         normal_mask = ~downturn_mode
         pull_tsp = np.minimum(rem_need, v_tsp) * normal_mask
-        tsp_w += pull_tsp + rmd_req
-        v_tsp -= pull_tsp
-        rem_need -= pull_tsp
+        tsp_w += pull_tsp + rmd_req; v_tsp -= pull_tsp; rem_need -= pull_tsp
         
-        # Downturn Sequence (MM -> Tax -> Roth -> TSP)
         pull_mm = np.minimum(rem_need, v_mm) * downturn_mode
-        v_mm -= pull_mm; rem_need -= pull_mm
+        v_mm -= pull_mm; mm_w += pull_mm; rem_need -= pull_mm
         
         pull_tax = np.minimum(rem_need, v_tax) * downturn_mode
-        v_tax -= pull_tax; rem_need -= pull_tax
+        v_tax -= pull_tax; tax_w += pull_tax; rem_need -= pull_tax
         
         pull_roth = np.minimum(rem_need, v_roth) * downturn_mode
-        v_roth -= pull_roth; rem_need -= pull_roth
+        v_roth -= pull_roth; roth_w += pull_roth; rem_need -= pull_roth
         
         pull_tsp_fb = np.minimum(rem_need, v_tsp) * downturn_mode
         v_tsp -= pull_tsp_fb; tsp_w += pull_tsp_fb
         
         prev_v_tsp = v_tsp.copy() + pull_tsp + pull_tsp_fb 
         
-        # Taxes
+        # Taxes & Expenses
         prov_income = current_pension + tsp_w + (0.5 * ss_arr)
         ss_taxable = np.where(prov_income > 32000, np.minimum(0.85 * ss_arr, 0.85 * (prov_income - 32000)), 0)
-        
         tot_taxable = current_pension + tsp_w + ss_taxable
+        
         fed_tax = calculate_taxes(tot_taxable, filing_status)
         state_tax = tot_taxable * 0.05
         
@@ -239,113 +202,183 @@ def run_simulation(IWR, market_paths, inflation_paths):
             irmaa_cost = np.array([IRMAA_PREMIUMS[min(tr, 5)] * 12 for tr in tier])
             
         tot_exp = fixed_expenses + fed_tax + state_tax + irmaa_cost
-        net_spendable = w_scheduled - tot_exp
         
         results.append({
-            'Year': year, 'Age': age, 'Total_Port': v_tsp + v_roth + v_tax + v_mm,
+            'Year': year, 'Age': age, 'Total_Port': total_port.copy(),
             'TSP': v_tsp.copy(), 'Roth': v_roth.copy(), 'Taxable': v_tax.copy(),
-            'MM': v_mm.copy(), 'HSA': v_hsa.copy(), 'Net_Spendable': net_spendable.copy(),
-            'Fed_Tax': fed_tax.copy(), 'IRMAA': irmaa_cost.copy(), 'RMD': rmd_req.copy(),
+            'MM': v_mm.copy(), 'HSA': v_hsa.copy(), 'Net_Spendable': (w_scheduled - tot_exp).copy(),
+            'TSP_W': tsp_w.copy(), 'MM_W': mm_w.copy(), 'Tax_W': tax_w.copy(), 'Roth_W': roth_w.copy(),
+            'Pension': current_pension.copy(), 'SS': ss_arr.copy(),
+            'Fed_Tax': fed_tax.copy(), 'State_Tax': state_tax.copy(), 'IRMAA': irmaa_cost.copy(),
+            'Fixed_Exp': fixed_expenses.copy(), 'Total_Exp': tot_exp.copy(), 'RMD': rmd_req.copy(),
             'Market_Ret': ret_t.copy(), 'Inflation': inf_t.copy()
         })
     return results
 
-# ==========================================
-# OPTIMIZATION: BRENT'S BOUNDARY CHECKED
-# ==========================================
 def optimize_iwr():
     m_paths, i_paths = generate_economic_paths(n_paths=10000, n_years=le_age - curr_age)
     
     def objective(iwr_guess):
         res = run_simulation(iwr_guess, m_paths, i_paths)
-        if not res: return -estate_floor
         return np.median(res[-1]['Total_Port']) - estate_floor
     
-    # Boundary Checking prevents Constraint Error
     low_b, high_b = 0.001, 0.25 
-    val_low = objective(low_b)
-    val_high = objective(high_b)
-
-    if val_low < 0 and val_high < 0:
-        st.warning(f"⚠️ Target Estate Floor (${estate_floor:,.2f}) is mathematically unachievable given your starting balances. Defaulting to safe baseline (0.1%).")
-        return low_b, m_paths, i_paths
-        
-    if val_low > 0 and val_high > 0:
-        st.success(f"🌟 Target Estate Floor (${estate_floor:,.2f}) is effortlessly exceeded even with max 25% withdrawals! Optimization capped at 25%.")
-        return high_b, m_paths, i_paths
-
-    opt_iwr = brentq(objective, low_b, high_b, xtol=1e-4, maxiter=30)
-    return opt_iwr, m_paths, i_paths
+    if objective(low_b) < 0: return low_b, m_paths, i_paths
+    if objective(high_b) > 0: return high_b, m_paths, i_paths
+    return brentq(objective, low_b, high_b, xtol=1e-4, maxiter=30), m_paths, i_paths
 
 # ==========================================
-# APPLICATION EXECUTION & REPORTING
+# 12. CLIENT REPORT STRUCTURE (BOLDIN FORMAT)
 # ==========================================
 if st.sidebar.button("Run Advanced Simulation", type="primary"):
-    with st.spinner("Executing 10,000 Monte Carlo Iterations & Stochastic Root-Finding..."):
+    with st.spinner("Executing 10,000 Monte Carlo Iterations & Stochastic Optimization..."):
         
         max_iwr, m_paths, i_paths = optimize_iwr()
         final_results = run_simulation(max_iwr, m_paths, i_paths)
         
-        # Extract Results
-        report_data_med = []
-        report_data_10 = []
-        
+        # Aggregate Median Data for the Report
+        report_data = []
         for r in final_results:
-            med_row = {
-                "Calendar Year": r['Year'], "Age": r['Age'], "Rate of Return": np.median(r['Market_Ret']),
-                "Inflation Rate": np.median(r['Inflation']), "Real Rate of Return": np.median(r['Market_Ret']) - np.median(r['Inflation']),
-                "Taxable ETF Balance": np.median(r['Taxable']), "Roth IRA Balance": np.median(r['Roth']),
-                "HSA Balance": np.median(r['HSA']), "Money Market Balance": np.median(r['MM']),
-                "Annual 401(k)/TSP Withdrawal": np.median(r['TSP'] * 0.04), "Federal Taxes": np.median(r['Fed_Tax']),
-                "Medicare Cost": np.median(r['IRMAA']), "Net Spendable Annual": np.median(r['Net_Spendable']),
-                "Net Monthly": np.median(r['Net_Spendable']) / 12, "Ending 401(k)/TSP Balance": np.median(r['TSP']),
-                "Ending Total Balance (excluding HSA)": np.median(r['Total_Port'])
-            }
-            report_data_med.append(med_row)
-            
-            p10_row = med_row.copy()
-            p10_row["Ending Total Balance (excluding HSA)"] = np.percentile(r['Total_Port'], 10)
-            p10_row["Net Spendable Annual"] = np.percentile(r['Net_Spendable'], 10)
-            report_data_10.append(p10_row)
-            
-        df_med = pd.DataFrame(report_data_med)
-        df_10 = pd.DataFrame(report_data_10)
-
-        # -----------------------------------
-        # CLIENT REPORT UI
-        # -----------------------------------
-        st.success(f"Simulation Complete. Optimal Initial Withdrawal Rate (IWR): **{max_iwr*100:.2f}%**")
+            report_data.append({k: np.median(v) if isinstance(v, np.ndarray) else v for k, v in r.items()})
+        df = pd.DataFrame(report_data)
         
-        st.header("📊 Lifetime Projections & Net Worth Forecast")
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=df_med['Age'], y=df_med['Ending Total Balance (excluding HSA)'], mode='lines', name='Median (50th) Wealth', line=dict(color='blue')))
-        fig1.add_trace(go.Scatter(x=df_10['Age'], y=df_10['Ending Total Balance (excluding HSA)'], mode='lines', name='Pessimistic (10th) Wealth', line=dict(color='red', dash='dash')))
-        fig1.add_hline(y=estate_floor, line_dash="dot", annotation_text="Estate Floor Constraint")
-        fig1.update_layout(title="Stochastic Wealth Trajectory", xaxis_title="Age", yaxis_title="Total Portfolio Value ($)")
-        st.plotly_chart(fig1, use_container_width=True)
+        # Calculate Percentiles & Probabilities
+        final_wealths = final_results[-1]['Total_Port']
+        prob_success = np.mean(final_wealths >= estate_floor) * 100
+        wealth_10th = [np.percentile(r['Total_Port'], 10) for r in final_results]
+        wealth_90th = [np.percentile(r['Total_Port'], 90) for r in final_results]
+
+        # ---------------------------------------------------------
+        # REPORT DASHBOARD UI
+        # ---------------------------------------------------------
+        st.success(f"Simulation Complete. Optimal Initial Withdrawal Rate: **{max_iwr*100:.2f}%**")
         
-        st.header("💵 Income Analysis & Cash Flow")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=df_med['Age'], y=df_med['Net Spendable Annual'], name='Net Real Spendable Income', marker_color='green'))
-        fig2.update_layout(title="Projected Real Spendable Income (Post-Tax/Guardrails Applied)", xaxis_title="Age", yaxis_title="Annual Income ($)", barmode='stack')
-        st.plotly_chart(fig2, use_container_width=True)
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 Lifetime Projections", 
+            "💵 Cash Flow & Income", 
+            "📈 Net Worth Forecast", 
+            "🏛️ Taxes & Withdrawals", 
+            "💡 Coach Alerts & To-Do"
+        ])
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Federal Tax Liabilities")
-            fig3 = go.Figure(go.Scatter(x=df_med['Age'], y=df_med['Federal Taxes'], fill='tozeroy'))
-            st.plotly_chart(fig3, use_container_width=True)
-        with col2:
-            st.subheader("Medicare Cost & IRMAA")
-            fig4 = go.Figure(go.Scatter(x=df_med['Age'], y=df_med['Medicare Cost'], fill='tozeroy', marker_color='orange'))
-            st.plotly_chart(fig4, use_container_width=True)
+        # TAB 1: LIFETIME PROJECTIONS & MONTE CARLO
+        with tab1:
+            st.header("Lifetime Projections & Monte Carlo Analysis")
+            st.markdown("A statistical overview of your plan's sustainability through varying market conditions.")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Monte Carlo Probability of Success", f"{prob_success:.1f}%", help="Probability of ending above Estate Floor")
+            c2.metric("Median Terminal Wealth", f"${df['Total_Port'].iloc[-1]:,.0f}")
+            c3.metric("Pessimistic (10th Pct) Wealth", f"${wealth_10th[-1]:,.0f}")
 
-        st.header("✅ Actionable To-Do List & Coach Alerts")
-        base_wd = max_iwr * (tsp_bal + roth_bal + tax_bal + mm_bal)
-        st.info(f"**Alert 1:** Your optimal CASAM Base Withdrawal is calculated at **${base_wd:,.2f}** per year.")
-        st.warning("**Alert 2:** Sequence of Return Risk (SORR) Guardrails are active. Be prepared to liquidate from the Money Market buffer during downturns.")
+            fig_mc = go.Figure()
+            fig_mc.add_trace(go.Scatter(x=df['Age'], y=wealth_90th, mode='lines', name='Optimistic (90th)', line=dict(color='lightgreen', dash='dot')))
+            fig_mc.add_trace(go.Scatter(x=df['Age'], y=df['Total_Port'], mode='lines', name='Median (50th)', line=dict(color='blue', width=3)))
+            fig_mc.add_trace(go.Scatter(x=df['Age'], y=wealth_10th, mode='lines', name='Pessimistic (10th)', line=dict(color='red', dash='dash')))
+            fig_mc.add_hline(y=estate_floor, line_dash="solid", line_color="black", annotation_text="Target Estate Floor")
+            fig_mc.update_layout(title="Stochastic Wealth Trajectory", xaxis_title="Age", yaxis_title="Total Assets ($)", hovermode="x unified")
+            st.plotly_chart(fig_mc, use_container_width=True)
 
+        # TAB 2: CASH FLOW & INCOME ANALYSIS
+        with tab2:
+            st.header("Cash Flow Forecast & Income Analysis")
+            st.markdown("Breakdown of all revenue streams versus projected living expenses.")
+            
+            fig_cf = go.Figure()
+            fig_cf.add_trace(go.Bar(x=df['Age'], y=df['SS'], name='Social Security', marker_color='#1f77b4'))
+            fig_cf.add_trace(go.Bar(x=df['Age'], y=df['Pension'], name='Pension', marker_color='#ff7f0e'))
+            total_withdrawals = df['TSP_W'] + df['MM_W'] + df['Tax_W'] + df['Roth_W']
+            fig_cf.add_trace(go.Bar(x=df['Age'], y=total_withdrawals, name='Portfolio Withdrawals', marker_color='#2ca02c'))
+            fig_cf.add_trace(go.Scatter(x=df['Age'], y=df['Total_Exp'] + df['Net_Spendable'], mode='lines', name='Total Spending Need (Incl. Taxes)', line=dict(color='black', width=2)))
+            
+            fig_cf.update_layout(barmode='stack', title="Income Sources vs. Total Expenses", xaxis_title="Age", yaxis_title="Annual Cash Flow ($)")
+            st.plotly_chart(fig_cf, use_container_width=True)
+            
+            st.subheader("Expense & Budget Details")
+            fig_exp = go.Figure()
+            fig_exp.add_trace(go.Bar(x=df['Age'], y=df['Fixed_Exp'], name='Fixed Costs (Mortgage/Health)', marker_color='gray'))
+            fig_exp.add_trace(go.Bar(x=df['Age'], y=df['Fed_Tax'] + df['State_Tax'], name='Taxes', marker_color='red'))
+            fig_exp.add_trace(go.Bar(x=df['Age'], y=df['IRMAA'], name='Medicare IRMAA', marker_color='orange'))
+            fig_exp.update_layout(barmode='stack', title="Itemized Core Expenses", xaxis_title="Age", yaxis_title="Expenses ($)")
+            st.plotly_chart(fig_exp, use_container_width=True)
+
+        # TAB 3: NET WORTH FORECAST
+        with tab3:
+            st.header("Net Worth Forecast")
+            st.markdown("Projections of total portfolio allocation over time.")
+            
+            fig_nw = go.Figure()
+            fig_nw.add_trace(go.Scatter(x=df['Age'], y=df['TSP'], mode='lines', stackgroup='one', name='Tax-Deferred (TSP/401k)'))
+            fig_nw.add_trace(go.Scatter(x=df['Age'], y=df['Roth'], mode='lines', stackgroup='one', name='Tax-Free (Roth)'))
+            fig_nw.add_trace(go.Scatter(x=df['Age'], y=df['Taxable'], mode='lines', stackgroup='one', name='Taxable Investments'))
+            fig_nw.add_trace(go.Scatter(x=df['Age'], y=df['MM'], mode='lines', stackgroup='one', name='Money Market Cash'))
+            fig_nw.add_trace(go.Scatter(x=df['Age'], y=df['HSA'], mode='lines', stackgroup='one', name='HSA Balance'))
+            
+            fig_nw.update_layout(title="Asset Liquidity Timeline", xaxis_title="Age", yaxis_title="Balance ($)", hovermode="x unified")
+            st.plotly_chart(fig_nw, use_container_width=True)
+
+        # TAB 4: TAXES, RMDS, & WITHDRAWAL STRATEGY
+        with tab4:
+            st.header("Withdrawal Strategy & Taxes")
+            
+            st.subheader("Account Liquidation Order")
+            fig_wd = go.Figure()
+            fig_wd.add_trace(go.Bar(x=df['Age'], y=df['TSP_W'], name='TSP / 401(k) Draws', marker_color='#9467bd'))
+            fig_wd.add_trace(go.Bar(x=df['Age'], y=df['Tax_W'], name='Taxable Inv Draws', marker_color='#8c564b'))
+            fig_wd.add_trace(go.Bar(x=df['Age'], y=df['MM_W'], name='Money Market Draws', marker_color='#e377c2'))
+            fig_wd.add_trace(go.Bar(x=df['Age'], y=df['Roth_W'], name='Roth IRA Draws', marker_color='#17becf'))
+            fig_wd.update_layout(barmode='stack', title="Dynamic Account Withdrawals (SORR Governed)", xaxis_title="Age", yaxis_title="Amount ($)")
+            st.plotly_chart(fig_wd, use_container_width=True)
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("Federal & State Taxes")
+                fig_tx = go.Figure(go.Scatter(x=df['Age'], y=df['Fed_Tax']+df['State_Tax'], fill='tozeroy', marker_color='red'))
+                st.plotly_chart(fig_tx, use_container_width=True)
+            with c2:
+                st.subheader("Required Min. Distributions (RMDs)")
+                fig_rmd = go.Figure(go.Scatter(x=df['Age'], y=df['RMD'], fill='tozeroy', marker_color='purple'))
+                st.plotly_chart(fig_rmd, use_container_width=True)
+
+        # TAB 5: COACH ALERTS & ACTIONABLE TO-DO
+        with tab5:
+            st.header("PlannerPlus Coach Alerts")
+            st.markdown("Automated monitoring of specific risks, oversights, and opportunities.")
+            
+            # Dynamic Alerts Logic
+            peak_tax_age = df.loc[df['Fed_Tax'].idxmax(), 'Age']
+            max_irmaa = df['IRMAA'].max()
+            mm_depleted_age = df.loc[df['MM'] <= 0, 'Age'].min() if (df['MM'] <= 0).any() else None
+
+            if peak_tax_age >= 75:
+                st.warning(f"⚠️ **RMD Tax Spike Alert:** Your taxes peak at age {peak_tax_age} due to mandatory RMDs. **Opportunity:** Consider systematic Roth Conversions before age 75 to smooth out this tax burden.")
+            else:
+                st.success("✅ **Tax Efficiency:** Your lifetime taxes appear relatively smooth without major RMD-driven cliffs.")
+                
+            if max_irmaa > 0:
+                st.warning(f"⚠️ **Medicare IRMAA Alert:** Your income triggers Medicare surcharges (IRMAA) in retirement reaching up to ${max_irmaa:,.0f}/yr. Review capital gains harvesting and Roth usage to manage MAGI.")
+                
+            if mm_depleted_age:
+                st.info(f"🛡️ **SORR Buffer Depletion:** Under median downturn conditions, your Money Market safe-buffer is depleted by age {mm_depleted_age}. Ensure you maintain enough cash equivalence entering the 'Go-Go' years.")
+
+            st.subheader("Actionable To-Do List")
+            st.checkbox(f"Set Year 1 Safe Withdrawal Limit to exactly ${(max_iwr * (tsp_bal + roth_bal + tax_bal + mm_bal)):,.2f}.")
+            st.checkbox("Consolidate current 401(k) / TSP accounts for streamlined RMD execution.")
+            st.checkbox(f"Review Estate Planning docs to ensure ${estate_floor:,.2f} floor transfers optimally to heirs.")
+            st.checkbox("Meet with a CPA to model discrete Roth Conversions in the 'Tax Valley' between Retirement and age 75.")
+
+        # STRICT CSV EXPORTS
+        st.divider()
         st.header("📥 Data Exports")
+        csv_med = df.to_csv(index=False).encode('utf-8')
+        
+        # Build 10th percentile dataframe specifically for export mapping
+        df_10 = df.copy()
+        for idx, r in enumerate(final_results):
+            df_10.at[idx, 'Total_Port'] = np.percentile(r['Total_Port'], 10)
+            df_10.at[idx, 'Net_Spendable'] = np.percentile(r['Net_Spendable'], 10)
+        csv_10 = df_10.to_csv(index=False).encode('utf-8')
+        
         c1, c2 = st.columns(2)
-        c1.download_button("Download CSV (Median Scenario)", df_med.to_csv(index=False).encode('utf-8'), "Retirement_Simulation_Median.csv", "text/csv")
-        c2.download_button("Download CSV (10th Percentile Scenario)", df_10.to_csv(index=False).encode('utf-8'), "Retirement_Simulation_10th.csv", "text/csv")
+        c1.download_button("Download Full CSV (Median Scenario)", csv_med, "Retirement_Simulation_Median.csv", "text/csv")
+        c2.download_button("Download Full CSV (10th Percentile)", csv_10, "Retirement_Simulation_10th.csv", "text/csv")
