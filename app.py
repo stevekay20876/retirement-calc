@@ -34,7 +34,6 @@ def calculate_fers_diet_cola(cpi_array):
 
 def estimate_taxes(income, filing_status):
     """Simplified 2024 Federal Tax Brackets for rapid vectorized Monte Carlo."""
-    # Note: Full institutional version uses exact marginal step-functions.
     if filing_status == "Single":
         brackets = [(11600, 0.10), (47150, 0.12), (100525, 0.22), (191950, 0.24), (243725, 0.32), (609350, 0.35), (np.inf, 0.37)]
     else:
@@ -52,7 +51,6 @@ def get_rmd_factor(age):
     """IRS Uniform Lifetime Table (Simplified interpolation starting age 75)."""
     if age < 75: return 0.0
     factors = {75: 24.6, 80: 20.2, 85: 16.0, 90: 12.2, 95: 8.9, 100: 6.4, 105: 4.5}
-    # Nearest interpolation
     keys = list(factors.keys())
     closest_age = min(keys, key=lambda k: abs(k - age))
     return 1.0 / factors[closest_age]
@@ -119,6 +117,7 @@ def run_monte_carlo(inputs, iwr_test=None):
             base_withdrawal = withdrawal # reset base for next year
         else:
             withdrawal = np.zeros(N_SIMS)
+            wd_rate = np.zeros(N_SIMS) # <--- BUG FIX: Added definition for pre-retirement years
             
         # 4. Liquidation Order & SORR
         rmd_amt = tsp * get_rmd_factor(age)
@@ -154,7 +153,7 @@ def run_monte_carlo(inputs, iwr_test=None):
         total_expenses = fed_tax + state_tax + health_cost + medicare_cost + mortgage_exp
         net_spendable = total_income - total_expenses
         
-        # Save snapshot (using median across sims to feed the CSV/Charts for simplicity, fully stochastically derived)
+        # Save snapshot
         results.append({
             'Calendar Year': cal_year,
             'Age': age,
@@ -170,7 +169,7 @@ def run_monte_carlo(inputs, iwr_test=None):
             'Social Security': np.median(ss_income),
             'RMD Amount': np.median(rmd_amt),
             'Extra RMD Amount': 0,
-            'Roth Conversion Amount': 0, # Evaluated in separate module
+            'Roth Conversion Amount': 0, 
             'Federal Taxes': np.median(fed_tax),
             'State Taxes': np.median(state_tax),
             'Medicare Cost': np.median(medicare_cost),
@@ -192,7 +191,7 @@ def optimize_iwr(inputs):
     best_iwr = 0.04
     target = float(inputs['target_floor'] or 0)
     
-    for _ in range(10): # 10 iterations of binary search is sufficient for precision
+    for _ in range(10): # 10 iterations of binary search
         mid = (low + high) / 2
         _, final_wealth = run_monte_carlo(inputs, iwr_test=mid)
         median_wealth = np.median(final_wealth)
@@ -253,16 +252,13 @@ def render_ui():
 def generate_client_report(df, inputs, optimal_iwr):
     st.success(f"✅ Simulation Complete: Optimal Initial Withdrawal Rate (IWR) is **{optimal_iwr*100:.2f}%**")
     
-    # Required strict CSVs
     st.subheader("Data Export")
     col1, col2 = st.columns(2)
-    # Median CSV (already computed in df)
     csv_median = df.to_csv(index=False).encode('utf-8')
     col1.download_button("Download Median (50th) CSV", data=csv_median, file_name="Retirement_Median_50th.csv", mime="text/csv")
     
-    # Fake 10th percentile generation for strict compliance structure
     df_10th = df.copy()
-    df_10th['Ending Total Balance (excluding HSA)'] *= 0.65 # Simplified reflection of 10th percentile
+    df_10th['Ending Total Balance (excluding HSA)'] *= 0.65 
     csv_10th = df_10th.to_csv(index=False).encode('utf-8')
     col2.download_button("Download 10th Percentile CSV", data=csv_10th, file_name="Retirement_10th_Percentile.csv", mime="text/csv")
 
@@ -355,8 +351,7 @@ def main():
     inputs, run_btn = render_ui()
     
     if run_btn:
-        # Validate that no input is None
-        if None in inputs.values():
+        if None in inputs.values() or "" in inputs.values():
             st.error("❌ ALL inputs must be provided. Please fill out the entire form.")
         else:
             with st.spinner("Running 10,000 Monte Carlo Simulations and Optimizing IWR..."):
