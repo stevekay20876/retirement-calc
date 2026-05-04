@@ -313,3 +313,50 @@ def plot_tornado(base_legacy, sens_results):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
+
+def plot_terminal_histogram(terminal_wealth_array, target_floor):
+    fig = go.Figure()
+    
+    # Calculate threshold based on engine logic (at least $1 to survive)
+    threshold = max(1.0, target_floor)
+    
+    # Clip the 99th percentile for visual clarity so the x-axis isn't skewed by extreme long-tail mega-wealth
+    p99 = np.percentile(terminal_wealth_array, 99)
+    
+    successes = terminal_wealth_array[terminal_wealth_array >= threshold]
+    failures = terminal_wealth_array[terminal_wealth_array < threshold]
+    
+    successes_plot = successes[successes <= p99]
+    failures_plot = failures[failures <= p99]
+    
+    fig.add_trace(go.Histogram(
+        x=failures_plot,
+        marker_color='indianred',
+        name='Shortfall / Bankruptcy',
+        opacity=0.85
+    ))
+    
+    fig.add_trace(go.Histogram(
+        x=successes_plot,
+        marker_color='mediumseagreen',
+        name='Target Met',
+        opacity=0.85
+    ))
+    
+    fig.update_layout(
+        barmode='stack',
+        title="Probability Distribution of Terminal Liquid Legacy (10,000 Realities)",
+        xaxis_title="Final Liquid Wealth at Life Expectancy (In Today's Dollars)",
+        yaxis_title="Frequency (Number of Scenarios)",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    fig.add_vline(x=target_floor, line_dash="dash", line_color="black", annotation_text="Target Legacy Floor", annotation_position="top right")
+    
+    median_val = np.median(terminal_wealth_array)
+    # Position annotation smartly so it doesn't overlap the target line text
+    annot_pos = "top left" if median_val > target_floor else "top right"
+    fig.add_vline(x=median_val, line_dash="dot", line_color="blue", annotation_text=f"Median: ${median_val:,.0f}", annotation_position=annot_pos)
+    
+    return fig

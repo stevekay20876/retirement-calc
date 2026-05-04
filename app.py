@@ -10,7 +10,7 @@ from exports import build_csv_dataframe
 from config import MOOP_LIMITS, TAX_BRACKETS_MFJ, TAX_BRACKETS_SINGLE, PORTFOLIOS
 from pdf_report import generate_pdf
 
-from visuals import plot_wealth_trajectory, plot_liquidity_timeline, plot_cash_flow_sources, plot_expenses_breakdown, plot_withdrawal_hierarchy, plot_taxes_and_rmds, plot_roth_strategy_comparison, plot_roth_tax_impact, plot_ss_breakeven, plot_medicare_comparison, plot_income_volatility, plot_legacy_breakdown, plot_fan_chart, plot_income_gap, plot_tornado
+from visuals import plot_wealth_trajectory, plot_liquidity_timeline, plot_cash_flow_sources, plot_expenses_breakdown, plot_withdrawal_hierarchy, plot_taxes_and_rmds, plot_roth_strategy_comparison, plot_roth_tax_impact, plot_ss_breakeven, plot_medicare_comparison, plot_income_volatility, plot_legacy_breakdown, plot_fan_chart, plot_income_gap, plot_tornado, plot_terminal_histogram
 
 st.set_page_config(page_title="Advanced Retirement Simulator", layout="wide")
 
@@ -913,6 +913,15 @@ with nav1:
         with t1:
             st.subheader("Liquid Portfolio Projections & Monte Carlo Analysis")
             st.plotly_chart(plot_wealth_trajectory(history_ui, inputs['target_floor'], years_arr, baseline_data_ui), use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("Distribution of Terminal Outcomes")
+            st.write("This histogram shows the spread of your final liquid net worth at the end of your plan across all 10,000 simulated realities. It makes the 'Probability of Success' visceral by revealing the size and frequency of potential shortfalls (red) versus surpluses (green).")
+            
+            # Calculate the terminal liquid array for the histogram
+            liquid_term_arr = history_ui['total_bal_real'][:, -1] - (history_ui['home_value'][:, -1] / history_ui['cum_inf'][:, -1])
+            st.plotly_chart(plot_terminal_histogram(liquid_term_arr, inputs['target_floor']), use_container_width=True)
+            
             st.markdown("---")
             st.subheader("Portfolio Optimization & Efficient Frontier")
             st.write("This analysis evaluates your custom account-by-account mix against standard benchmark portfolios to find the optimal balance of growth vs. Sequence of Return Risk (guardrail pay cuts).")
