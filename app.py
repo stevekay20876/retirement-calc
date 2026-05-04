@@ -1049,23 +1049,23 @@ with t6:
             st.subheader("Interactive Social Security Breakeven Analysis")
             st.write("Drag the slider below to see how living longer (or shorter) changes which claiming strategy yields the most total lifetime dollars. The crossover point generally occurs between ages 80 and 82.")
             
-            # --- FIX: Bind slider to session state so it doesn't snap back on rerun ---
-            if "ss_interactive_le" not in st.session_state:
-                st.session_state.ss_interactive_le = max(62, inputs['life_expectancy'])
-
+            # 1. Safely force the baseline life expectancy to an integer between 62 and 105
+            default_le = int(max(62, min(105, inputs.get('life_expectancy', 85))))
+            
+            # 2. Render the slider with a foolproof session_state fallback
             interactive_le = st.slider(
                 "Drag to adjust your Estimated Lifespan / Mortality Age:", 
                 min_value=62, 
                 max_value=105, 
-                key="ss_interactive_le", 
-                step=1
+                value=st.session_state.get("ss_slider", default_le), 
+                step=1,
+                key="ss_slider"
             )
-            # --------------------------------------------------------------------------
             
             primary_fra_age = 67 if inputs['current_age'] <= 64 else 66.5
             current_year = datetime.datetime.now().year
             
-            # Pass the slider's value into the decoupled plot function
+            # 3. Pass the slider's value into the decoupled plot function
             fig_ss, val_dict = plot_ss_breakeven(inputs['ss_fra'], inputs['current_age'], current_year, fra_age=primary_fra_age, life_expectancy=interactive_le)
             st.plotly_chart(fig_ss, use_container_width=True)
             
