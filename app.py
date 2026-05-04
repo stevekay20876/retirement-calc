@@ -1049,8 +1049,18 @@ with t6:
             st.subheader("Interactive Social Security Breakeven Analysis")
             st.write("Drag the slider below to see how living longer (or shorter) changes which claiming strategy yields the most total lifetime dollars. The crossover point generally occurs between ages 80 and 82.")
             
-            # Interactive Slider (Updates instantly without re-running MC engine)
-            interactive_le = st.slider("Drag to adjust your Estimated Lifespan / Mortality Age:", min_value=62, max_value=105, value=max(62, inputs['life_expectancy']), step=1)
+            # --- FIX: Bind slider to session state so it doesn't snap back on rerun ---
+            if "ss_interactive_le" not in st.session_state:
+                st.session_state.ss_interactive_le = max(62, inputs['life_expectancy'])
+
+            interactive_le = st.slider(
+                "Drag to adjust your Estimated Lifespan / Mortality Age:", 
+                min_value=62, 
+                max_value=105, 
+                key="ss_interactive_le", 
+                step=1
+            )
+            # --------------------------------------------------------------------------
             
             primary_fra_age = 67 if inputs['current_age'] <= 64 else 66.5
             current_year = datetime.datetime.now().year
@@ -1060,12 +1070,16 @@ with t6:
             st.plotly_chart(fig_ss, use_container_width=True)
             
             ss_base = inputs['ss_fra']
-            st.table(pd.DataFrame({
-                "Claiming Age": ["Age 62 (Early)", f"Age {primary_fra_age} (FRA)", "Age 70 (Delayed)"], 
-                "Annual Benefit (Pre-2035)": [f"${ss_base * 0.7:,.0f}", f"${ss_base:,.0f}", f"${ss_base * 1.24:,.0f}"], 
-                f"Total Accumulated by Age {interactive_le}": [f"${val_dict['Claim at 62']:,.0f}", f"${val_dict[f'Claim at {primary_fra_age}']:,.0f}", f"${val_dict['Claim at 70']:,.0f}"],
-                "Probability of Portfolio Success": [f"{max(0, prob_success - 8):.1f}%", f"{prob_success:.1f}%", f"{min(100, prob_success + 6):.1f}%"]
-            }))
+            
+            if ss_base == 0:
+                st.warning("⚠️ You entered $0 for Social Security. The chart is flat because no guaranteed income is being modeled.")
+            else:
+                st.table(pd.DataFrame({
+                    "Claiming Age": ["Age 62 (Early)", f"Age {primary_fra_age} (FRA)", "Age 70 (Delayed)"], 
+                    "Annual Benefit (Pre-2035)": [f"${ss_base * 0.7:,.0f}", f"${ss_base:,.0f}", f"${ss_base * 1.24:,.0f}"], 
+                    f"Total Accumulated by Age {interactive_le}": [f"${val_dict['Claim at 62']:,.0f}", f"${val_dict[f'Claim at {primary_fra_age}']:,.0f}", f"${val_dict['Claim at 70']:,.0f}"],
+                    "Probability of Portfolio Success": [f"{max(0, prob_success - 8):.1f}%", f"{prob_success:.1f}%", f"{min(100, prob_success + 6):.1f}%"]
+                }))
             
             # Actuarial Verdict Logic
             if inputs['life_expectancy'] < 80:
