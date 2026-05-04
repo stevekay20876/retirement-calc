@@ -234,28 +234,51 @@ def plot_roth_tax_impact(roth_results, winner, years_arr):
     )
     return fig
 
-def plot_ss_breakeven(ss_fra, age_arr, years_arr, fra_age=67):
-    early_stream = [(ss_fra * 0.7) * (0.79 if yr >= 2035 else 1.0) if age >= 62 else 0 for age, yr in zip(age_arr, years_arr)]
-    fra_stream = [(ss_fra * 1.0) * (0.79 if yr >= 2035 else 1.0) if age >= fra_age else 0 for age, yr in zip(age_arr, years_arr)]
-    delayed_stream = [(ss_fra * 1.24) * (0.79 if yr >= 2035 else 1.0) if age >= 70 else 0 for age, yr in zip(age_arr, years_arr)]
+def plot_ss_breakeven(ss_fra, current_age, current_year, fra_age=67, life_expectancy=85):
+    # Decouple from the MC array so the user can interactively slide from 62 to 105
+    plot_age_arr = np.arange(62, 106)
+    plot_years_arr = [current_year + (a - current_age) for a in plot_age_arr]
+    
+    # 2035 SSA Trust Fund depletion haircut modeled as 21% reduction
+    early_stream = [(ss_fra * 0.7) * (0.79 if yr >= 2035 else 1.0) if age >= 62 else 0 for age, yr in zip(plot_age_arr, plot_years_arr)]
+    fra_stream = [(ss_fra * 1.0) * (0.79 if yr >= 2035 else 1.0) if age >= fra_age else 0 for age, yr in zip(plot_age_arr, plot_years_arr)]
+    delayed_stream = [(ss_fra * 1.24) * (0.79 if yr >= 2035 else 1.0) if age >= 70 else 0 for age, yr in zip(plot_age_arr, plot_years_arr)]
     
     cum_early = np.cumsum(early_stream)
     cum_fra = np.cumsum(fra_stream)
     cum_delayed = np.cumsum(delayed_stream)
     
+    # Calculate values exactly at the user's selected interactive life expectancy
+    le_idx = min(max(0, life_expectancy - 62), len(plot_age_arr)-1)
+    val_early = cum_early[le_idx]
+    val_fra = cum_fra[le_idx]
+    val_delayed = cum_delayed[le_idx]
+    
+    fra_key = f"Claim at {fra_age}"
+    vals = {"Claim at 62": val_early, fra_key: val_fra, "Claim at 70": val_delayed}
+    winner = max(vals, key=vals.get)
+    
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=age_arr, y=cum_early, mode='lines', name='Claim at 62'))
-    fig.add_trace(go.Scatter(x=age_arr, y=cum_fra, mode='lines', name=f'Claim at FRA ({fra_age})'))
-    fig.add_trace(go.Scatter(x=age_arr, y=cum_delayed, mode='lines', name='Claim at 70'))
+    fig.add_trace(go.Scatter(x=plot_age_arr, y=cum_early, mode='lines', name='Claim at 62', line=dict(color='#EF553B', width=3)))
+    fig.add_trace(go.Scatter(x=plot_age_arr, y=cum_fra, mode='lines', name=f'Claim at FRA ({fra_age})', line=dict(color='#00CC96', width=3)))
+    fig.add_trace(go.Scatter(x=plot_age_arr, y=cum_delayed, mode='lines', name='Claim at 70', line=dict(color='#636EFA', width=3)))
+    
+    # Draw interactive marker line for life expectancy
+    fig.add_vline(x=life_expectancy, line_dash="dash", line_color="black", 
+                  annotation_text=f"Selected Age: {life_expectancy}", annotation_position="top left" if life_expectancy > 80 else "top right")
+    
+    # Drop "dots" at the intersection of the line and the curves
+    fig.add_trace(go.Scatter(x=[life_expectancy]*3, y=[val_early, val_fra, val_delayed], mode='markers', showlegend=False, 
+                             marker=dict(size=10, color=['#EF553B', '#00CC96', '#636EFA'], line=dict(color='black', width=1))))
     
     fig.update_layout(
-        title="Cumulative Guaranteed Income Breakeven Analysis", 
+        title=f"Cumulative Guaranteed Income (Mathematical Winner at Age {life_expectancy}: <b>{winner}</b>)", 
         xaxis_title="Age", 
-        yaxis_title="",
+        yaxis_title="Total Lifetime Dollars Received",
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
-    return fig
+    return fig, vals
 
 def plot_medicare_comparison(history, years_arr, inputs):
     fig = go.Figure()

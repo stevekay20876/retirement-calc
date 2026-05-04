@@ -1046,14 +1046,31 @@ with t6:
                 st.table(conv_df[conv_df['Target Conversion Amount'] > 0].style.format({"Target Conversion Amount": "${:,.0f}", "Est. IRS Taxable Income": "${:,.0f}"}))
 
         with t10:
-            st.subheader("Social Security Claiming Strategy")
+            st.subheader("Interactive Social Security Breakeven Analysis")
+            st.write("Drag the slider below to see how living longer (or shorter) changes which claiming strategy yields the most total lifetime dollars. The crossover point generally occurs between ages 80 and 82.")
+            
+            # Interactive Slider (Updates instantly without re-running MC engine)
+            interactive_le = st.slider("Drag to adjust your Estimated Lifespan / Mortality Age:", min_value=62, max_value=105, value=max(62, inputs['life_expectancy']), step=1)
+            
             primary_fra_age = 67 if inputs['current_age'] <= 64 else 66.5
-            st.plotly_chart(plot_ss_breakeven(inputs['ss_fra'], age_arr, years_arr, fra_age=primary_fra_age), use_container_width=True)
+            current_year = datetime.datetime.now().year
+            
+            # Pass the slider's value into the decoupled plot function
+            fig_ss, val_dict = plot_ss_breakeven(inputs['ss_fra'], inputs['current_age'], current_year, fra_age=primary_fra_age, life_expectancy=interactive_le)
+            st.plotly_chart(fig_ss, use_container_width=True)
+            
             ss_base = inputs['ss_fra']
-            st.table(pd.DataFrame({"Claiming Age": ["Age 62 (Early)", f"Age {primary_fra_age} (FRA)", "Age 70 (Delayed)"], "Annual Benefit (Pre-2035)": [f"${ss_base * 0.7:,.0f}", f"${ss_base:,.0f}", f"${ss_base * 1.24:,.0f}"], "Probability of Portfolio Success": [f"{max(0, prob_success - 8):.1f}%", f"{prob_success:.1f}%", f"{min(100, prob_success + 6):.1f}%"]}))
+            st.table(pd.DataFrame({
+                "Claiming Age": ["Age 62 (Early)", f"Age {primary_fra_age} (FRA)", "Age 70 (Delayed)"], 
+                "Annual Benefit (Pre-2035)": [f"${ss_base * 0.7:,.0f}", f"${ss_base:,.0f}", f"${ss_base * 1.24:,.0f}"], 
+                f"Total Accumulated by Age {interactive_le}": [f"${val_dict['Claim at 62']:,.0f}", f"${val_dict[f'Claim at {primary_fra_age}']:,.0f}", f"${val_dict['Claim at 70']:,.0f}"],
+                "Probability of Portfolio Success": [f"{max(0, prob_success - 8):.1f}%", f"{prob_success:.1f}%", f"{min(100, prob_success + 6):.1f}%"]
+            }))
+            
+            # Actuarial Verdict Logic
             if inputs['life_expectancy'] < 80:
                 st.warning("**Actuarial Verdict: Claim Early (Age 62 or Current Age)**")
-                st.write("**Reasoning:** Because your entered life expectancy is below the mathematical crossover point (~Age 80-82), claiming early allows you to capture more total guaranteed income during your lifetime than if you delayed.")
+                st.write("**Reasoning:** Because your baseline entered life expectancy is below the mathematical crossover point (~Age 80-82), claiming early allows you to capture more total guaranteed income during your lifetime than if you delayed.")
             elif inputs['ss_claim_age'] < 70:
                 st.info(f"**Actuarial Verdict: You selected to claim at {inputs['ss_claim_age']}.**")
                 st.write(f"**Reasoning:** While delaying to 70 maximizes 'Longevity Insurance' by permanently increasing your payout by 8% per year, your chosen claiming age of {inputs['ss_claim_age']} has been fully modeled and stress-tested against your portfolio.")
