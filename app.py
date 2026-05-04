@@ -98,39 +98,102 @@ with nav1:
                 state_dict[date_field] = state_dict[date_field].isoformat()
         return state_dict
 
-    with st.expander("💾 Client Profile Management (Save / Load)", expanded=False):
+    if 'scenarios_library' not in st.session_state:
+        st.session_state.scenarios_library = {}
+
+    with st.expander("💾 Scenario Library & Profile Management", expanded=False):
+        st.markdown("#### 📚 In-App Scenario Library")
+        st.info("Save multiple variations (e.g., 'Base Case', 'Early Retire', 'Aggressive Spend') to quickly swap between them during this session.")
+        
+        c_lib1, c_lib2, c_lib3 = st.columns(3)
+        with c_lib1:
+            new_scene_name = st.text_input("Save active profile as:", value=st.session_state.get('save_file_name', 'Base Case'))
+            if st.button("➕ Save to Library", use_container_width=True):
+                st.session_state.scenarios_library[new_scene_name] = get_current_state()
+                st.session_state['save_file_name'] = new_scene_name
+                st.session_state.master_state['save_file_name'] = new_scene_name
+                st.rerun()
+        
+        with c_lib2:
+            saved_keys = list(st.session_state.scenarios_library.keys())
+            scene_to_load = st.selectbox("Load from library:", saved_keys if saved_keys else ["No saved scenarios"])
+            if st.button("📂 Load Scenario", use_container_width=True, disabled=not saved_keys):
+                loaded_data = st.session_state.scenarios_library[scene_to_load]
+                for key, value in loaded_data.items(): 
+                    if key in ['ret_date', 's_ret_date', 'mil_diems', 's_mil_diems'] and isinstance(value, str):
+                        try:
+                            parsed_date = datetime.date.fromisoformat(value)
+                            st.session_state[key] = parsed_date
+                            st.session_state.master_state[key] = parsed_date
+                        except: pass
+                    else:
+                        st.session_state[key] = value
+                        st.session_state.master_state[key] = value
+                st.session_state.ui_mode = "Expert Form (All Fields)"
+                st.session_state['save_file_name'] = scene_to_load
+                st.session_state.master_state['save_file_name'] = scene_to_load
+                st.rerun()
+
+        with c_lib3:
+            scene_to_del = st.selectbox("Delete from library:", saved_keys if saved_keys else ["No saved scenarios"], key="del_sel")
+            if st.button("🗑️ Delete Scenario", use_container_width=True, disabled=not saved_keys):
+                del st.session_state.scenarios_library[scene_to_del]
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### 🖥️ Local File Import / Export")
         col_load, col_save = st.columns(2)
         with col_load:
-            uploaded_profile = st.file_uploader("Load Saved Profile (.json)", type="json")
+            uploaded_profile = st.file_uploader("Import Profile or Library (.json)", type="json")
             if uploaded_profile is not None:
                 if "loaded_file" not in st.session_state or st.session_state.loaded_file != uploaded_profile.name:
                     try:
                         loaded_data = json.load(uploaded_profile)
-                        for key, value in loaded_data.items(): 
-                            if key in ['ret_date', 's_ret_date', 'mil_diems', 's_mil_diems'] and isinstance(value, str):
-                                parsed_date = datetime.date.fromisoformat(value)
-                                st.session_state[key] = parsed_date
-                                st.session_state.master_state[key] = parsed_date
-                            else:
-                                st.session_state[key] = value
-                                st.session_state.master_state[key] = value
-                        st.session_state.loaded_file = uploaded_profile.name
-                        st.session_state.ui_mode = "Expert Form (All Fields)"
-                        st.success("Profile Loaded Successfully!")
-                        st.rerun() 
+                        if loaded_data.get("_is_workspace"):
+                            # Imports an entire multi-scenario library workspace
+                            for k, v in loaded_data.get("library", {}).items():
+                                st.session_state.scenarios_library[k] = v
+                            st.session_state.loaded_file = uploaded_profile.name
+                            st.rerun()
+                        else:
+                            # Standard import for backwards compatibility with single-profiles
+                            for key, value in loaded_data.items(): 
+                                if key in ['ret_date', 's_ret_date', 'mil_diems', 's_mil_diems'] and isinstance(value, str):
+                                    try:
+                                        parsed_date = datetime.date.fromisoformat(value)
+                                        st.session_state[key] = parsed_date
+                                        st.session_state.master_state[key] = parsed_date
+                                    except: pass
+                                else:
+                                    st.session_state[key] = value
+                                    st.session_state.master_state[key] = value
+                            
+                            st.session_state.loaded_file = uploaded_profile.name
+                            st.session_state.ui_mode = "Expert Form (All Fields)"
+                            st.rerun() 
                     except Exception as e:
-                        st.error("Error loading profile.")
+                        st.error("Error loading file.")
+        
         with col_save:
-            profile_name = st.text_input("Name your save file:", value=st.session_state.get('save_file_name', 'client_profile'))
-            if profile_name != st.session_state.get('save_file_name'):
-                st.session_state['save_file_name'] = profile_name
-                st.session_state.master_state['save_file_name'] = profile_name
+            export_mode = st.radio("Export Type:", ["Current Active Profile", "Entire Scenario Library"], horizontal=True)
+            if export_mode == "Current Active Profile":
+                profile_name = st.text_input("File name:", value=st.session_state.get('save_file_name', 'client_profile'), key="export_single_name")
+                if profile_name != st.session_state.get('save_file_name'):
+                    st.session_state['save_file_name'] = profile_name
+                    st.session_state.master_state['save_file_name'] = profile_name
+                    
+                safe_filename = profile_name.strip()
+                if not safe_filename: safe_filename = "client_profile"
+                if not safe_filename.endswith(".json"): safe_filename += ".json"
                 
-            safe_filename = profile_name.strip()
-            if not safe_filename: safe_filename = "client_profile"
-            if not safe_filename.endswith(".json"): safe_filename += ".json"
-            
-            st.download_button("⬇️ Save Current Profile to Computer", data=json.dumps(get_current_state(), indent=4), file_name=safe_filename, mime="application/json", use_container_width=True, help="Important: Make sure you press 'Enter' or click outside of any text box you just edited before clicking Save to lock in the final keystrokes!")
+                st.download_button("⬇️ Save Current Profile", data=json.dumps(get_current_state(), indent=4), file_name=safe_filename, mime="application/json", use_container_width=True, help="Important: Make sure you press 'Enter' or click outside of any text box you just edited before clicking Save to lock in the final keystrokes!")
+            else:
+                st.info(f"Exporting library containing {len(st.session_state.scenarios_library)} scenarios.")
+                workspace_data = {
+                    "_is_workspace": True,
+                    "library": st.session_state.scenarios_library
+                }
+                st.download_button("⬇️ Save Entire Library", data=json.dumps(workspace_data, indent=4), file_name="retirement_scenarios.json", mime="application/json", use_container_width=True, disabled=(len(st.session_state.scenarios_library)==0))
 
     has_run = 'sim_data' in st.session_state
 
