@@ -368,3 +368,84 @@ def plot_terminal_histogram(terminal_wealth_array, target_floor):
     fig.add_vline(x=median_val, line_dash="dot", line_color="blue", annotation_text=f"Median: ${median_val:,.0f}", annotation_position=annot_pos)
     
     return fig
+
+def plot_tax_bracket_heatmap(history, years_arr, filing_status):
+    from config import TAX_BRACKETS_MFJ, TAX_BRACKETS_SINGLE
+    brackets = TAX_BRACKETS_MFJ if filing_status == 'MFJ' else TAX_BRACKETS_SINGLE
+    
+    rates = [f"{int(b[1]*100)}%" for b in brackets]
+    
+    # We deflate nominal taxable income back to Today's Dollars to map it cleanly against the base brackets
+    med_tax_inc_nom = np.median(history['taxable_income'], axis=0)
+    med_cum_inf = np.median(history['cum_inf'], axis=0)
+    med_tax_inc_real = med_tax_inc_nom / med_cum_inf
+    
+    z_data = np.zeros((len(brackets), len(years_arr)))
+    text_data = np.empty((len(brackets), len(years_arr)), dtype=object)
+    
+    for j, yr in enumerate(years_arr):
+        inc = med_tax_inc_real[j]
+        marginal_idx = 0
+        
+        # Find which bracket the income falls into
+        for i, (limit, rate) in enumerate(brackets):
+            if inc <= limit or i == len(brackets) - 1:
+                marginal_idx = i
+                break
+                
+        for i, (limit, rate) in enumerate(brackets):
+            if i < marginal_idx:
+                z_data[i, j] = 1.0  # Filled
+                text_data[i, j] = "Filled"
+            elif i == marginal_idx:
+                z_data[i, j] = 0.5  # Active Marginal Bracket
+                if i == len(brackets) - 1:
+                    text_data[i, j] = "Top Tier"
+                else:
+                    headroom = limit - inc
+                    if headroom >= 1000:
+                        text_data[i, j] = f"${headroom/1000:,.0f}k space"
+                    else:
+                        text_data[i, j] = f"${headroom:,.0f} space"
+            else:
+                z_data[i, j] = 0.0  # Empty
+                text_data[i, j] = ""
+                
+    # Flip arrays upside down so the highest bracket (37%) is physically at the top of the chart
+    z_data = np.flipud(z_data)
+    text_data = np.flipud(text_data)
+    rates_reversed = list(reversed(rates))
+    
+    # Custom colorscale: 0=Slate-50 (Empty), 0.5=Emerald-500 (Active Green), 1.0=Slate-400 (Filled Grey)
+    colorscale = [
+        [0.0, '#F8FAFC'], 
+        [0.5, '#10B981'], 
+        [1.0, '#94A3B8']
+    ]
+    
+    fig = go.Figure(data=go.Heatmap(
+        z=z_data,
+        x=years_arr,
+        y=rates_reversed,
+        text=text_data,
+        texttemplate="%{text}",
+        textfont=dict(size=11, color="white"), # White text pops beautifully against both the green and grey
+        colorscale=colorscale,
+        zmin=0,
+        zmax=1,
+        showscale=False,
+        hoverinfo="skip"
+    ))
+    
+    fig.update_layout(
+        title="Marginal Tax Bracket & Conversion Headroom Heatmap (Today's $)",
+        xaxis_title="Projected Year",
+        yaxis_title="Federal Tax Bracket",
+        template="plotly_white",
+        plot_bgcolor="white"
+    )
+    
+    fig.update_xaxes(showgrid=False, zeroline=False)
+    fig.update_yaxes(showgrid=False, zeroline=False)
+    
+    return fig

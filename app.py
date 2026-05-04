@@ -10,7 +10,7 @@ from exports import build_csv_dataframe
 from config import MOOP_LIMITS, TAX_BRACKETS_MFJ, TAX_BRACKETS_SINGLE, PORTFOLIOS
 from pdf_report import generate_pdf
 
-from visuals import plot_wealth_trajectory, plot_liquidity_timeline, plot_cash_flow_sources, plot_expenses_breakdown, plot_withdrawal_hierarchy, plot_taxes_and_rmds, plot_roth_strategy_comparison, plot_roth_tax_impact, plot_ss_breakeven, plot_medicare_comparison, plot_income_volatility, plot_legacy_breakdown, plot_fan_chart, plot_income_gap, plot_tornado, plot_terminal_histogram
+from visuals import plot_wealth_trajectory, plot_liquidity_timeline, plot_cash_flow_sources, plot_expenses_breakdown, plot_withdrawal_hierarchy, plot_taxes_and_rmds, plot_roth_strategy_comparison, plot_roth_tax_impact, plot_ss_breakeven, plot_medicare_comparison, plot_income_volatility, plot_legacy_breakdown, plot_fan_chart, plot_income_gap, plot_tornado, plot_terminal_histogram, plot_tax_bracket_heatmap
 
 st.set_page_config(page_title="Advanced Retirement Simulator", layout="wide")
 
@@ -976,6 +976,7 @@ with nav1:
             c3.metric("Years of Safe Liquidity Buffer", safe_years_display, help="Definition: How many years you can survive strictly off your cash and taxable accounts without selling a single share of your TSP or IRA.\n\nExample: A 3.0 ratio means you can comfortably outlast a 3-year market crash. (Displays ∞ / N/A if guaranteed income fully covers expenses without needing portfolio withdrawals).")
 
         with t6:
+with t6:
             st.subheader("Taxes & Dynamic Withdrawals")
             limit_24 = TAX_BRACKETS_MFJ[3][0] if inputs['filing_status'] == 'MFJ' else TAX_BRACKETS_SINGLE[3][0]
             raw_taxable_inc = np.median(history_ui['taxable_income'], axis=0)[ret_idx]
@@ -986,6 +987,13 @@ with nav1:
             with col1: st.plotly_chart(plot_withdrawal_hierarchy(history_ui, years_arr), use_container_width=True)
             with col2: st.plotly_chart(plot_taxes_and_rmds(history_ui, years_arr, baseline_data_ui), use_container_width=True)
             
+            # --- NEW HEATMAP BLOCK ---
+            st.markdown("---")
+            st.subheader("Marginal Bracket Heatmap")
+            st.write("This heatmap reveals exactly which IRS tax bracket your median simulation lands in each year. The **green cells** indicate your active marginal bracket and display how much 'headroom' you have left before being pushed into the next tier—a critical metric for planning Roth Conversions.")
+            st.plotly_chart(plot_tax_bracket_heatmap(history_ui, years_arr, inputs['filing_status']), use_container_width=True)
+            # -------------------------
+
             st.markdown("### Tax-Efficient Withdrawal Strategy Analysis")
             st.table(pd.DataFrame({"Strategy Component": ["Tax-Efficient Withdrawal Order", "Dynamic Downturn Strategy", "Capital Gains (LTCG)", "Impact of Inflation"], "Analysis / Value": ["Normal Years: Fund lifestyle purely from TSP/IRA, allowing Roth & HSA to compound tax-free.", "Crash Years: Halt TSP withdrawals. Deplete Cash -> Taxable -> HSA -> Roth to avoid Sequence Risk.", "The engine tracks your Taxable Cost Basis. When Taxable funds are sold, it applies 0/15/20% LTCG brackets + 3.8% NIIT.", "Expenses rise geometrically with CPI. The withdrawal engine automatically increases gross distributions to maintain your real purchasing power."]}))
 
